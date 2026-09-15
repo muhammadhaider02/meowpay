@@ -28,9 +28,7 @@ dist/
 .DS_Store
 Thumbs.db
 
-# Exercise working files
-meowpay.md
-chat.txt
-
 # Agent context
 CLAUDE.md
+AGENT.md
+meowpay.md

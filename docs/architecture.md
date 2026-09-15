@@ -1,4 +1,4 @@
-# MeowPay: schema, persistence and the HTTP shell
+# MeowPay: the ledger, the schema and the HTTP shell
 
 Navigational map of what exists. Rationale for what was chosen and what was
 skipped lives in [decisions.md](decisions.md).
@@ -6,6 +6,42 @@ skipped lives in [decisions.md](decisions.md).
 A cat is both the user and the account holder. Humans are not modelled: a human
 is a funding source outside the system boundary, so a top-up is a deposit from a
 system treasury account rather than a movement between two stored entities.
+
+---
+
+## The settlement path
+
+One transaction, in `ledger.py`. Three of these orderings are load bearing and
+each is documented at the line that depends on it.
+
+| Step | What happens |
+|---|---|
+| 1 | Validate amount and idempotency key in pure Python, before a connection is checked out |
+| 1b | Compute `owner_cat_id`, the Python twin of the generated column, and assert it is a party |
+| 1c | `set_config` the transaction's own `lock_timeout`, **before anything takes a lock** |
+| 2 | Lock both parties `FOR NO KEY UPDATE`, **`ORDER BY id`** |
+| 3 | Existence check, from the lock result, **before the claim** |
+| 4 | Claim the idempotency key: `INSERT ... ON CONFLICT ON CONSTRAINT ... DO NOTHING RETURNING` |
+| 5 | **On conflict, replay and return**, before the funds check |
+| 6 | Funds and ceiling checks, on the locked values |
+| 7 | Two `UPDATE ... RETURNING`, arithmetic on the SQL side, debit then credit |
+| 8 | Both ledger lines in one `INSERT`, so the ledger never holds half a movement |
+| 9 | Log **after** COMMIT, outside the transaction |
+
+**Why step 2 comes first**, and it is not the idempotency claim: the overdraft
+check and the ceiling check both read a balance that must not move under them,
+and consistent acquisition order is what keeps opposing transfers deadlock free.
+
+**Why step 3 precedes step 4**: the claim has two foreign keys to `cats`, so a
+missing party would raise a ForeignKeyViolation, abort the transaction, and make
+the replay read in step 5 impossible.
+
+**Why step 5 precedes step 6**: retrying a settled transfer must return its
+original result even if the sender has since spent everything.
+
+`ORDER BY` is the whole of the lock ordering. Sorting ids in Python looks like it
+would do this and does not, because `id IN (...)` compiles to `id = ANY(array)`
+and array order is not lock order.
 
 ---
 
@@ -42,6 +78,8 @@ meowpay/
     │   ├── config.py
     │   ├── constants.py
     │   ├── db.py
+    │   ├── errors.py
+    │   ├── ledger.py                 # the only writer of balances and entries
     │   ├── models.py
     │   ├── session.py
     │   └── api/
@@ -49,11 +87,15 @@ meowpay/
     │       ├── deps.py
     │       ├── middleware.py
     │       ├── schemas.py
-    │       └── routes/health.py
+    │       └── routes/
+    │           ├── __init__.py       # the /api/v1 router everything mounts on
+    │           └── health.py
     │
     └── tests/
         ├── conftest.py
         ├── test_health.py
+        ├── test_ledger.py
+        ├── test_ledger_concurrency.py
         └── test_schema.py
 ```
 
@@ -64,6 +106,8 @@ meowpay/
 | Module | Responsibility |
 |---|---|
 | `config.py` | Env loading from `backend/.env`. `require_env()` raises at the point of use so a missing variable names itself in the traceback of whatever needed it; `optional_env()` treats empty as unset. `database_url()` does not return what it was given: it rewrites a bare `postgresql://` to `postgresql+psycopg` (SQLAlchemy would otherwise reach for psycopg2, which is not installed, and the `ModuleNotFoundError` reads as a broken install), defaults `sslmode` to `require` and refuses `disable`/`allow`/`prefer`, refuses port 6543, and refuses a bare `postgres` username against the pooler. `test_database_url()` derives from it by renaming the database, so there is one credential and not two that can drift. `db_schema()`, `require_database()`, `cors_origins()` (refuses `*`). |
+| `ledger.py` | **The only writer of `cats.balance`, `transfers` and `entries`.** `transfer()` and `deposit()` share one `_settle()`, because a deposit is the same movement with the treasury as sender, which is what keeps every entry summing to zero. Returns a frozen `Settlement`, never an ORM object, so a read after the session closes cannot lazy-load. Takes a `sessionmaker` and never a `Session`: row locks are released by COMMIT, so a caller who committed mid-flight would drop them. `_apply_transaction_timeouts()` sets `lock_timeout` per transaction rather than per connection, see [decisions.md](decisions.md#session-settings-do-not-survive-the-pooler). |
+| `errors.py` | Every rejection as a typed class carrying a stable `code` and an HTTP `status`. Raised ahead of the database, so every CHECK stays a backstop that should never fire: one firing is a bug and a 500, not a user error. |
 | `constants.py` | `TREASURY_CAT_ID` (all-zeros sentinel), `TREASURY_HANDLE`, `MAX_AMOUNT` (1e12 per movement), `JS_SAFE_INTEGER` (2^53-1), `API_V1_PREFIX`. |
 | `db.py` | `Base` plus the constraint naming convention (`ck_`, `uq_`, `fk_`, `ix_`, `pk_`). The names are load bearing: `test_schema.py` matches them out of `IntegrityError` text. Imports nothing environmental, so importing a model never requires an environment. |
 | `models.py` | The three tables and every constraint. Deliberately **schema-unqualified**: `search_path` supplies `meowpay` instead, because schema-qualified models compared against the connection's default schema make autogenerate report every table missing, which is permanent `alembic check` drift. |
@@ -191,6 +235,24 @@ Read from `backend/.env`. See `backend/.env.example`.
 | `conftest.py` | Throwaway `meowpay_test` database created, migrated with Alembic and dropped per session. Per-test isolation is an outer transaction that is never committed, with `join_transaction_mode="create_savepoint"` so code under test can really call `commit()` while the outer transaction still owns the rollback. `_test_db_name()` refuses any database not ending `_test`, because the drops use `WITH (FORCE)` and would succeed in destroying the application's data |
 | `test_health.py` | `/health` healthy, unreachable and reachable-but-unmigrated. Plus the 500 envelope carrying CORS headers and leaking nothing, and a forged request id being replaced |
 | `test_schema.py` | Every constraint above, driven by raw SQL so the database refuses them even when the application is wrong |
+| `test_ledger.py` | Settlement, idempotent replay, every typed rejection, and reconciliation. Two tests assert on the **emitted SQL** rather than behaviour, because `ORDER BY` and `FOR NO KEY UPDATE` are plan-shape properties whose absence shows up as a deadlock under load and never in a functional test |
+| `test_ledger_concurrency.py` | Eight threads on real connections with real commits: one key settles exactly once, eight transfers cannot overdraw, opposing transfers do not deadlock, and the ledger still reconciles afterwards. Plus the `lock_timeout` to `55P03` to 503 chain |
+
+### Why the concurrency tests cannot pass vacuously
+
+`sessions_factory` binds every session to one rolled-back connection, so threads
+on it would share a Postgres backend and never actually race. The `race` fixture
+uses a separate engine and four devices to make a fake pass impossible:
+
+| Device | What it stops |
+|---|---|
+| Two barriers, `warm` then `go` | Without them the OS serialises by start time and the slowest thread runs alone |
+| Backend pid recorded **while** `warm` holds every session open | Collecting pids afterwards proves nothing: one connection reused N times reports one pid N times |
+| `max_overflow=0` on the pool | Otherwise SQLAlchemy opens 10 more past `pool_size` and a test meant to starve the pool quietly succeeds |
+| `assert len(set(pids)) == threads` | A pool that serialised the threads fails the test instead of passing. It also catches a `DATABASE_URL` pointing at the transaction pooler, where connections are multiplexed |
+
+If that assertion ever fires, the answer is not to lower `CONCURRENCY_THREADS`.
+That silently weakens six tests and leaves them green.
 
 ### The skip rule
 

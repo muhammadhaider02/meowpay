@@ -8,18 +8,17 @@
 # each one, so make stays a convenience and never a dependency for anyone who
 # does not have it.
 #
-# There is no `up`, `down` or `clean`. The database is a hosted Supabase project
-# rather than a container, so there is nothing to start and nothing to tear down.
-# `clean` in particular is deliberately absent: the old one destroyed a local
-# volume, and the honest equivalent here would destroy a real project's data.
-# The README documents `alembic downgrade base` as a raw command instead.
+# There is deliberately no `clean` or `reset` target. The database is a hosted
+# project holding real data, so a one-word command that drops it is a mistake
+# waiting to happen. The README documents `alembic downgrade base` as a raw
+# command instead, which is long enough to be deliberate.
 
 help:
 	@echo "dev        install dependencies and run migrations"
-	@echo "seed       create demo cats and fund them"
 	@echo "serve      run the api with hot reload"
+	@echo "test-fast  tests, skipping the slow concurrency suite"
 	@echo "all        lint, typecheck and test"
-	@echo "See the README for the raw command behind each target."
+	@echo "See the README for the raw command behind every target."
 
 # One command from a clean clone to a migrated schema, once backend/.env exists.
 dev: install migrate

@@ -25,8 +25,7 @@ transfer settles exactly once or not at all.
 ## Quickstart
 
 Requires [uv](https://docs.astral.sh/uv/) and a free
-[Supabase](https://supabase.com) project. There is nothing to install locally
-beyond uv, and no Docker.
+[Supabase](https://supabase.com) project. That is the whole list.
 
 **1. Create a Supabase project.** The free tier is enough.
 
@@ -66,6 +65,7 @@ dependency:
 |---|---|
 | `install` | `cd backend && uv sync --group dev` |
 | `migrate` | `cd backend && uv run alembic upgrade head` |
+| `revision` | `cd backend && uv run alembic revision --autogenerate -m "..."` |
 | `dev` | `install` then `migrate` |
 | `serve` | `cd backend && uv run meowpay-api --reload` |
 | `lint` | `cd backend && uv run ruff check src/ tests/` |

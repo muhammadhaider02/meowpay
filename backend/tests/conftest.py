@@ -10,18 +10,24 @@ before widening it.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+import threading
+import uuid
+from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from typing import NoReturn
 
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import Connection, Engine, create_engine, make_url, text
+from sqlalchemy import Connection, Engine, create_engine, insert, make_url, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
 from meowpay import config
 from meowpay.config import BACKEND_ROOT
+from meowpay.constants import TREASURY_CAT_ID
+from meowpay.ledger import Ledger
+from meowpay.models import Cat
 from meowpay.session import build_engine, build_migration_engine
 
 SKIP_REASON = (
@@ -221,3 +227,197 @@ def sessions_factory(connection: Connection) -> sessionmaker[Session]:
         join_transaction_mode="create_savepoint",
         expire_on_commit=False,
     )
+
+
+# -- the ledger ------------------------------------------------------------
+
+
+@pytest.fixture
+def ledger(sessions_factory: sessionmaker[Session]) -> Ledger:
+    return Ledger(sessions_factory)
+
+
+@pytest.fixture
+def make_cat(sessions_factory: sessionmaker[Session]) -> Callable[..., uuid.UUID]:
+    """Create an ordinary cat.
+
+    auth_user_id is not optional. ck_cats_only_system_lacks_auth_user says
+    is_system = (auth_user_id IS NULL), so a cat created without one is a system
+    account, and ck_cats_only_the_sentinel_is_system then rejects it under a name
+    that has nothing to do with identity. Written down here once so a fixture
+    that forgets it does not fail confusingly.
+
+    A random uuid is not a lie. There is deliberately no foreign key to
+    auth.users, so as far as this database is concerned a cat's identity is a
+    uuid and nothing more. That is exactly why the ledger suite can run without
+    an auth server anywhere near it.
+
+    The handle has to satisfy ck_cats_handle_shape and be lowercase. Hex off the
+    uuid does both and cannot collide across tests.
+    """
+
+    def _make(
+        balance: int = 0,
+        handle: str | None = None,
+        auth_user_id: uuid.UUID | None = None,
+    ) -> uuid.UUID:
+        cat_id = uuid.uuid4()
+        with sessions_factory.begin() as session:
+            session.execute(
+                insert(Cat).values(
+                    id=cat_id,
+                    handle=handle or f"cat_{cat_id.hex[:12]}",
+                    display_name="Test Cat",
+                    auth_user_id=auth_user_id or uuid.uuid4(),
+                    balance=balance,
+                )
+            )
+        return cat_id
+
+    return _make
+
+
+# -- concurrency -----------------------------------------------------------
+#
+# The fixtures above cannot be used for these. `sessions_factory` binds every
+# session to ONE connection inside an outer transaction that is rolled back, so
+# ten threads would share one Postgres backend, interleave statements on a
+# connection that is not thread safe, and never actually race. Threads need their
+# own connections and have to really commit to be visible to each other, which
+# means real cleanup instead of rollback.
+
+CONCURRENCY_THREADS = 8
+
+# The warm barrier is reached only after a thread has opened a connection, which
+# against a remote database means a TCP connect, a TLS handshake, pooler auth and
+# the connect listener's own round trips, for every thread at once. Measured at
+# roughly a second per connection, so fifteen was uncomfortably close.
+WARM_TIMEOUT_SECONDS = 30
+# The go barrier is reached milliseconds later with every connection already
+# warm, so a long wait there is a genuine hang and the tight bound is the point.
+GO_TIMEOUT_SECONDS = 15
+# Covers one full lock_timeout wait plus a settle, with wide margin. Not a
+# correctness knob: it is the "something is actually wedged" backstop.
+RESULT_TIMEOUT_SECONDS = 60
+
+
+@pytest.fixture(scope="session")
+def committing_engine(database: None) -> Iterator[Engine]:
+    """An engine whose sessions really commit, one connection per thread.
+
+    pool_size is raised to match the thread count and overflow is switched off,
+    so every thread provably gets its own backend or the test fails.
+    """
+    # max_overflow=0 makes pool_size a hard cap. Without it SQLAlchemy opens up
+    # to 10 more connections past pool_size, so a starved pool would still hand
+    # out enough connections and the guard in `race` would never fire.
+    eng = build_engine(config.test_database_url(), pool_size=CONCURRENCY_THREADS, max_overflow=0)
+    yield eng
+    eng.dispose()
+
+
+@pytest.fixture(scope="session")
+def committing_sessions(committing_engine: Engine) -> sessionmaker[Session]:
+    """Bound to the ENGINE, not a connection, so each session gets its own backend."""
+    return sessionmaker(committing_engine, expire_on_commit=False)
+
+
+@pytest.fixture
+def committed_tables(committing_engine: Engine) -> Iterator[None]:
+    """Wipe before and after, since these tests really commit.
+
+    Before as well as after, so a test that died halfway does not poison the next.
+    `cats` is not truncated: migration 0002 put the treasury there and every
+    deposit depends on it, so its balance is reset instead. `transfers` and
+    `entries` truncate together because entries references transfers with
+    ON DELETE RESTRICT.
+
+    This runs against the throwaway database, not the application's. That is the
+    whole of the protection and it is why a separate database was worth keeping:
+    no routing mistake in this file can reach real rows, because they are not in
+    this database at all. `_test_db_name()` is what guarantees which database
+    this is.
+    """
+
+    def wipe() -> None:
+        with committing_engine.begin() as conn:
+            conn.execute(text("TRUNCATE entries, transfers RESTART IDENTITY"))
+            conn.execute(text("DELETE FROM cats WHERE id <> :t"), {"t": TREASURY_CAT_ID})
+            conn.execute(text("UPDATE cats SET balance = 0 WHERE id = :t"), {"t": TREASURY_CAT_ID})
+
+    wipe()
+    yield
+    wipe()
+
+
+@pytest.fixture
+def race() -> Callable[..., list[object]]:
+    """Run `work` on N threads that provably overlap.
+
+    Four things make this a race rather than a loop, and each answers a way this
+    kind of test silently stops testing anything.
+
+    1. Two barriers. `warm` holds every thread while it has a session open, `go`
+       releases them into the ledger at the same instant. Without them the OS
+       serialises by start time and the slowest thread runs alone.
+    2. The backend pid is recorded WHILE the warm barrier holds every session
+       open, so N distinct pids proves N Postgres sessions existed at once.
+       Collecting them afterwards would prove nothing: one connection reused N
+       times reports one pid N times.
+    3. If the pool cannot supply N connections the warm barrier times out and the
+       test fails with BrokenBarrierError. That is the point. A pool that
+       serialises the threads turns this into a slow serial test that still
+       passes.
+    4. Connections are warm before the measured phase, so no thread spends its
+       first milliseconds on a handshake while the others are already settling.
+
+    Exceptions are returned rather than raised, because "five succeeded and three
+    hit insufficient funds" is a correct outcome for several of these tests.
+
+    The pid assertion now does double duty. Through a transaction pooler,
+    connections are multiplexed and the pids would repeat, so this also fails
+    loudly if DATABASE_URL ever names the wrong port. If it does fire, the answer
+    is never to quietly lower CONCURRENCY_THREADS: that silently weakens six
+    tests and leaves them passing.
+    """
+
+    def _race(
+        sessions: sessionmaker[Session],
+        work: Callable[[int], object],
+        *,
+        threads: int = CONCURRENCY_THREADS,
+    ) -> list[object]:
+        warm = threading.Barrier(threads, timeout=WARM_TIMEOUT_SECONDS)
+        go = threading.Barrier(threads, timeout=GO_TIMEOUT_SECONDS)
+        pids: list[int] = []
+        guard = threading.Lock()
+
+        def runner(index: int) -> object:
+            with sessions() as session:
+                pid = session.execute(text("SELECT pg_backend_pid()")).scalar_one()
+                with guard:
+                    pids.append(pid)
+                # Release the read transaction that autobegan above before
+                # blocking. Holding one open across the barrier would sit idle in
+                # transaction for as long as the slowest thread takes to arrive.
+                session.rollback()
+                warm.wait()
+            go.wait()
+            return work(index)
+
+        outcomes: list[object] = []
+        with ThreadPoolExecutor(max_workers=threads) as pool:
+            futures = [pool.submit(runner, i) for i in range(threads)]
+            for future in futures:
+                try:
+                    outcomes.append(future.result(timeout=RESULT_TIMEOUT_SECONDS))
+                except Exception as exc:
+                    outcomes.append(exc)
+
+        assert len(set(pids)) == threads, (
+            f"{len(set(pids))} distinct Postgres backends for {threads} threads. "
+            "The pool serialised them, so this test did not actually race."
+        )
+        return outcomes
+
+    return _race

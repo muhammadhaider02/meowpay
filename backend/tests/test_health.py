@@ -42,10 +42,10 @@ def client(app: FastAPI) -> Iterator[TestClient]:
 
 
 def test_health_is_healthy_when_the_database_is_migrated(client: TestClient) -> None:
-    # Asserted unconditionally. An earlier version skipped on 503, which meant a
-    # genuinely broken /health reported itself as the reviewer's Postgres being
-    # down and the suite stayed green. The `db` marker and the conftest skip
-    # already handle a missing database, so this can be unconditional.
+    # Asserted unconditionally, and it must stay that way. Skipping on a 503
+    # here would mean a genuinely broken /health reports itself as the
+    # reviewer's database being down, and the suite stays green. The `db` marker
+    # and the conftest skip already handle a database that is really missing.
     response = client.get("/health")
 
     assert response.status_code == 200

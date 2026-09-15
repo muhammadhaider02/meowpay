@@ -24,9 +24,9 @@ def _apply_session_settings(dbapi_connection: Any, schema: str) -> None:
 
     Two things here are load bearing and neither is obvious.
 
-    The settings are issued here rather than through libpq's startup `options`,
-    which is where they used to live. Supavisor parses the startup packet for its
-    own tenant routing and does not forward arbitrary settings to the backend it
+    Do not move these into libpq's startup `options` in connect_args, which is
+    the obvious place for them. Supavisor parses the startup packet for its own
+    tenant routing and does not forward arbitrary settings to the backend it
     owns. Measured against the real project: connecting through the session
     pooler with `-c lock_timeout=3s` in connect_args and then asking the server
     gives back `0`. The connection succeeds, nothing errors and the setting is

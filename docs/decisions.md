@@ -23,6 +23,11 @@ covers what exists. The map of what exists is in
 | **Throwaway test database, not a test schema** | Supabase allows it: `postgres` has `CREATEDB`, the pooler routes to the new database and `DROP ... WITH (FORCE)` works against a live session. Measured, not assumed. A whole database means no routing mistake in `conftest.py` can reach the application's rows |
 | **Alembic, not Supabase migrations** | `models.py` stays the single source of truth and `alembic check` catches drift. One migration tool rather than two that can disagree |
 | **`/health` reads the treasury row, not `SELECT 1`** | `SELECT 1` passes against a reachable but unmigrated database, which is the failure a health check most needs to catch after a deploy |
+| **One settlement path for transfers and deposits** | A deposit is the same movement with the treasury as sender. One path means one place the zero-sum property can break, and one place to fix it |
+| **`Ledger` takes a `sessionmaker`, never a `Session`** | Row locks are released by COMMIT. A caller holding the session could commit mid-flight and drop them, so the ledger owns its transaction boundaries rather than borrowing someone else's |
+| **Rejections are typed and raised ahead of the database** | Every CHECK stays a backstop that should never fire. One firing is a bug and a 500, not a user error, which is why none of them are caught |
+| **`FOR NO KEY UPDATE`, not `FOR UPDATE`** | `balance` is not a key column, so the weak mode is sufficient and does not conflict with the `FOR KEY SHARE` that foreign key checks take. The strong mode would deadlock against them under load |
+| **Lock order comes from `ORDER BY`, not from sorting in Python** | `id IN (...)` compiles to `id = ANY(array)` and array order is not lock order. Sorting the ids in Python looks like it works and does nothing. Asserted against the emitted SQL, because the absence shows up as a deadlock under load and never in a functional test |
 
 ## Where the tables live
 
@@ -55,9 +60,9 @@ This is the one place the hosted database is stronger than a local one would be.
 
 ## Session settings do not survive the pooler
 
-The timeouts used to ride in libpq startup `options`. Supavisor parses the
-startup packet for its own tenant routing and does not forward arbitrary
-settings to the backend it owns.
+Passing them in libpq's startup `options` is the obvious approach and it does
+not work here. Supavisor parses the startup packet for its own tenant routing
+and does not forward arbitrary settings to the backend it owns.
 
 Measured against the real project, connecting through the session pooler with
 `-c lock_timeout=3s` in `connect_args`:
@@ -68,10 +73,37 @@ statement_timeout                     2min     (asked for 10s; 2min is Supabase'
 idle_in_transaction_session_timeout   0        (asked for 15s)
 ```
 
-The connection succeeds. Nothing errors. The settings are simply absent. They are
-issued per connection in a `connect` listener instead, with `autocommit` toggled
-on around the `SET`, because otherwise the pool's check-in `ROLLBACK` reverts
-them and the handler works exactly once per connection.
+The connection succeeds. Nothing errors. The settings are simply absent. `search_path`
+and the coarse nets are issued per connection in a `connect` listener instead,
+with `autocommit` toggled on around the `SET`, because otherwise the pool's
+check-in `ROLLBACK` reverts them and the handler works exactly once per
+connection.
+
+**`lock_timeout` goes further and is set per transaction**, as the first
+statement inside `_settle`. It is the one setting the money path depends on:
+Postgres raises `55P03` when it expires, the ledger translates that to
+`LedgerBusyError`, and the caller gets a retryable 503 instead of a hang. If it
+is silently absent, that path does not exist and a contended transfer waits out
+the 30s `statement_timeout` and fails as `57014`, which nothing translates.
+
+Scoping it to the transaction is also better than what it replaced, independently
+of the pooler. On the connection, `idle_in_transaction_session_timeout` clamped
+every session in the process, including test scaffolding that legitimately holds
+an open transaction while it waits on a barrier. Now it constrains only the
+transaction that actually holds row locks.
+
+**Eight seconds, derived rather than picked.** A settle is about seven round
+trips and the locks are held from the locking SELECT through COMMIT, so at ~50ms
+RTT each holder keeps them for roughly 300ms. Waiters queue, so with eight
+threads on one pair of rows the last waits about 7 x 300ms = 2.1s before jitter.
+Three seconds passes on a good run and fails on a bad one, which is the
+definition of a flaky test. Eight is still a defensible production ceiling.
+
+Two tests cover this, and neither existed before: one asserts the `set_config` is
+the first statement of the transaction, the other holds a conflicting lock and
+asserts both `LedgerBusyError` and that the wait landed in the expected window.
+Verified by sabotage: with the call removed, the first fails and the second
+fails as `QueryCanceled` after 30s, exactly as predicted.
 
 ---
 
@@ -82,7 +114,7 @@ each is a decision rather than an oversight. This list grows with the slice.
 
 | Not built | Why |
 |---|---|
-| Storing passwords at all | Supabase Auth owns them, so the backend holds only a public key. With a shared secret, anyone who can read the deployment environment can mint a token for any cat, which for a money service is the whole ballgame |
+| Storing passwords at all | `cats` carries an `auth_user_id` and no hash, so Supabase Auth owns credentials and this service never sees one. It also means the backend can verify tokens with a public key rather than holding the key they are signed with, and anyone who can read a deployment environment holding a shared secret can mint a token for any cat |
 | A deferred constraint trigger for zero-sum | Would make the zero-sum property structural rather than upheld by a single writer. More machinery than this slice earns, and a reconciliation test catches the same class of bug |
 | A status column on `transfers` | A movement is one transaction, so a failure rolls the row away and `settled` is the only value it could ever hold |
 | A Postgres enum for `kind` | `VARCHAR(16)` plus a `CHECK` instead. Extending a real enum needs `ALTER TYPE ADD VALUE`, which cannot run in the same transaction that adds it and which autogenerate handles badly |
@@ -93,7 +125,9 @@ each is a decision rather than an oversight. This list grows with the slice.
 
 | Trade-off | Consequence |
 |---|---|
-| **The treasury is a global write hotspot** | Every deposit will lock one row, so deposits serialize. Correct at this scale. At real scale you shard it per region |
+| **The treasury is a global write hotspot** | Every deposit locks one row, so deposits serialize. Correct at this scale. At real scale you shard it per region |
+| **A failed transfer does not consume its idempotency key** | The opposite of Stripe, and deliberate. A rejection is not a settlement, so retrying after fixing the cause should succeed rather than replay a failure. A caller who wants the Stripe behaviour can use a fresh key |
+| **The zero-sum property is not a database constraint** | It holds because `ledger.py` is the only writer, and a reconciliation test asserts it. Saying the schema guarantees it would be false |
 | **`UNIQUE (transfer_id, cat_id)` means one leg per cat** | Fine for two-party movements. Fee or FX legs would need revisiting |
 | **Free tier sleeps** | The database pauses after 7 days of inactivity. The bring-your-own-project path in the README is the real mitigation |
 | **Tests share a project with the application** | The free tier allows two projects in total. Isolation comes from a separate throwaway database and from refusing any database whose name does not end `_test` |
