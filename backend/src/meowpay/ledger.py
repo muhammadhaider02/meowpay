@@ -183,7 +183,7 @@ class Ledger:
         # arrive as an IntegrityError and a 500. Doing it first means a malformed
         # request never occupies a pool slot and never takes a row lock.
         _check_amount(amount)
-        _check_idempotency_key(idempotency_key)
+        check_idempotency_key(idempotency_key)
         if from_cat_id == to_cat_id:
             raise SelfTransferError()
 
@@ -559,7 +559,7 @@ def _check_amount(amount: int) -> None:
         raise AmountOutOfRangeError(amount)
 
 
-def _check_idempotency_key(key: str) -> None:
+def check_idempotency_key(key: str) -> None:
     """Mirrors ck_transfers_idempotency_key_shape plus the varchar(255) cast.
 
     The lower bound of 8 exists only in the CHECK, so without this a seven

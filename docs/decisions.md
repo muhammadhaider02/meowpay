@@ -39,6 +39,17 @@ covers what exists. The map of what exists is in
 | **Rejections are typed and raised ahead of the database** | Every CHECK stays a backstop that should never fire. One firing is a bug and a 500, not a user error, which is why none of them are caught |
 | **`FOR NO KEY UPDATE`, not `FOR UPDATE`** | `balance` is not a key column, so the weak mode is sufficient and does not conflict with the `FOR KEY SHARE` that foreign key checks take. The strong mode would deadlock against them under load |
 | **Lock order comes from `ORDER BY`, not from sorting in Python** | `id IN (...)` compiles to `id = ANY(array)` and array order is not lock order. Sorting the ids in Python looks like it works and does nothing. Asserted against the emitted SQL, because the absence shows up as a deadlock under load and never in a functional test |
+| **The sender comes from the token, never from the body** | A `from_handle` field would let anyone spend anyone's treats, and no constraint in the database would stop it. `extra="forbid"` turns an attempt into a 422 rather than a silent no-op |
+| **The recipient is named by handle, not by id** | A uuid in a request body invites a client to store one. The handle is what the sender actually typed, and it is normalised by the same function onboarding uses |
+| **A deposit takes no recipient field** | It credits the caller, resolved from the token. A target field would be a mint into someone else's account |
+| **The idempotency key is a header, not a body field** | It describes the request rather than the movement, and the header name is the one everybody already implements. Presence is checked in the route so the refusal carries `idempotency_key_invalid` rather than Pydantic's generic `validation_error` |
+| **201 fresh, 200 on replay** | The status is the only place the distinction is free. A client that reads neither it nor `replayed` still gets the correct answer, which is the point of idempotency |
+| **`balance_after`, not `balance`, on a movement** | On a replay it is the historical value from the ledger line. Calling it `balance` would make a week-old replay look like `GET /api/v1/me` contradicting itself |
+| **Only `GET /api/v1/me` reports a balance** | One place that can report a stale one. It is read outside any lock, so it is advisory: the ledger rechecks funds under a row lock and that is the only check that counts |
+| **Statements paginate by keyset, not OFFSET** | The index is on `(cat_id, id DESC)`, so `id < :before` is a range scan at any depth. OFFSET would also skip or repeat rows whenever a movement lands between requests, which on a live money feed is routine rather than rare |
+| **The recipient picker carries no balances** | A directory that reported them would tell every signed-in cat exactly who is worth stealing from. It also excludes the caller, because offering a self transfer invites the error the ledger refuses |
+| **Routes translate no errors** | Every ledger and auth rejection already carries its own `code` and status. A `try/except` in a route would be a second place where the status for insufficient funds is decided |
+| **A repeated `Idempotency-Key` header is refused** | FastAPI hands a `str`-typed header only the first value and drops the rest, so a client that sent two keys would settle under one and retry under the other. That is a double spend assembled from a header nobody looked at, so the parameter is a list and more than one value is a 422 |
 
 ## Where the tables live
 

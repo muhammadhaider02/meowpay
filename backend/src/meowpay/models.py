@@ -132,9 +132,7 @@ class Cat(Base):
         # must. The pair of this and only_the_sentinel_is_system also makes an
         # unlinked ordinary cat impossible, so there is never an
         # UPDATE cats SET auth_user_id = ... path anywhere.
-        CheckConstraint(
-            "is_system = (auth_user_id IS NULL)", name="only_system_lacks_auth_user"
-        ),
+        CheckConstraint("is_system = (auth_user_id IS NULL)", name="only_system_lacks_auth_user"),
         # Keeps every balance exactly representable in JavaScript. The per-movement
         # cap alone does not: enough deposits still walk a balance past 2**53 - 1,
         # and the treasury, being the negative of all circulation, gets there first.
@@ -201,8 +199,8 @@ class Transfer(Base):
         # speculative-insertion path blocks on the inserting transaction and
         # re-checks once it resolves, so a second caller with the same key
         # either sees the committed row or gets to insert its own. Measured on
-        # Postgres 17 against this schema, where the loser waited out the 3s
-        # lock_timeout rather than returning zero rows immediately.
+        # Postgres 17 against this schema, where the loser waited out the
+        # settlement's lock_timeout rather than returning zero rows immediately.
         #
         # Worth stating because the obvious assumption is the opposite. The
         # lock still comes first, for three other reasons: the overdraft check

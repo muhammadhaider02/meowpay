@@ -13,7 +13,14 @@ Health is deliberately not here. It is mounted unversioned at the root in
 from fastapi import APIRouter
 
 from meowpay.api.routes.cats import router as cats_router
+from meowpay.api.routes.me import router as me_router
+from meowpay.api.routes.movements import router as movements_router
 from meowpay.constants import API_V1_PREFIX
 
 api_router = APIRouter(prefix=API_V1_PREFIX)
 api_router.include_router(cats_router)
+api_router.include_router(me_router)
+# No prefix of its own: /transfers and /deposits are siblings of /cats rather
+# than children of a shared noun, because the resource being created is the
+# movement and the two kinds settle through one path in the ledger.
+api_router.include_router(movements_router)

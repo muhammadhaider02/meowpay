@@ -14,8 +14,14 @@ from sqlalchemy import Connection, text
 from sqlalchemy.exc import IntegrityError
 
 from meowpay.api.routes.cats import normalise_handle
-from meowpay.constants import HANDLE_REGEX, TREASURY_CAT_ID
-from meowpay.errors import HandleInvalidError
+from meowpay.constants import HANDLE_REGEX, MAX_AMOUNT, TREASURY_CAT_ID
+from meowpay.errors import AmountOutOfRangeError, HandleInvalidError, IdempotencyKeyInvalidError
+from meowpay.ledger import (
+    IDEMPOTENCY_KEY_MAX_LENGTH,
+    IDEMPOTENCY_KEY_MIN_LENGTH,
+    _check_amount,
+    check_idempotency_key,
+)
 from meowpay.models import HANDLE_PATTERN
 
 pytestmark = pytest.mark.db
@@ -354,3 +360,113 @@ def test_the_handle_check_in_the_database_matches_the_one_the_service_enforces(
             # Anything the service refuses is fine either way: it never reaches
             # the database. Recorded so the probe set stays honest.
             assert accepted_by_postgres in (True, False)
+
+
+def test_the_idempotency_key_bounds_in_the_database_match_the_ones_the_service_enforces(
+    connection: Connection,
+) -> None:
+    """Same class of gap as the handle guard, and commit 5 made it reachable.
+
+    `alembic check` does not compare CHECK bodies, so `check_idempotency_key`
+    and `ck_transfers_idempotency_key_shape` can drift apart silently. Until the
+    HTTP surface existed the key was only ever supplied by our own seed script;
+    now a caller sets it in a header, so a seven character key has to be a 422
+    and not a 500 from a constraint nobody expected to fire.
+    """
+    definition = connection.execute(
+        text(
+            "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+            "WHERE conname = 'ck_transfers_idempotency_key_shape'"
+        )
+    ).scalar_one()
+
+    assert str(IDEMPOTENCY_KEY_MIN_LENGTH) in definition, (
+        f"the database enforces {definition!r}, the service enforces a minimum of "
+        f"{IDEMPOTENCY_KEY_MIN_LENGTH}"
+    )
+    assert str(IDEMPOTENCY_KEY_MAX_LENGTH) in definition, (
+        f"the database enforces {definition!r}, the service enforces a maximum of "
+        f"{IDEMPOTENCY_KEY_MAX_LENGTH}"
+    )
+
+    # The differential half. Anything the service accepts must survive the live
+    # constraint, or it is a 500 on a value the caller was told was fine.
+    probes = [
+        "x" * IDEMPOTENCY_KEY_MIN_LENGTH,
+        "x" * IDEMPOTENCY_KEY_MAX_LENGTH,
+        "x" * (IDEMPOTENCY_KEY_MIN_LENGTH - 1),
+        "x" * (IDEMPOTENCY_KEY_MAX_LENGTH + 1),
+        "seed-v1-dahlia",
+        "",
+    ]
+    for probe in probes:
+        try:
+            check_idempotency_key(probe)
+            accepted_by_service = True
+        except IdempotencyKeyInvalidError:
+            accepted_by_service = False
+
+        accepted_by_postgres = connection.execute(
+            text("SELECT length(:candidate) BETWEEN :low AND :high"),
+            {
+                "candidate": probe,
+                "low": IDEMPOTENCY_KEY_MIN_LENGTH,
+                "high": IDEMPOTENCY_KEY_MAX_LENGTH,
+            },
+        ).scalar_one()
+
+        if accepted_by_service:
+            assert accepted_by_postgres, (
+                f"the service accepts the key {probe!r} ({len(probe)} characters), "
+                f"which ck_transfers_idempotency_key_shape refuses. That is a 500, not a 422."
+            )
+
+
+def test_the_amount_bounds_in_the_database_match_the_ones_the_service_enforces(
+    connection: Connection,
+) -> None:
+    """The third Python-mirrors-SQL pair, and the one that moves money.
+
+    `_check_amount` mirrors two constraints at once, `ck_transfers_amount_positive`
+    and `ck_transfers_amount_within_cap`. A cap raised in `constants.py` and not
+    in a migration makes a large transfer a 500 after the row locks are already
+    held, which is the worst place in the codebase to discover a mismatch.
+    """
+    definitions: dict[str, str] = {
+        row.conname: row.definition
+        for row in connection.execute(
+            text(
+                "SELECT conname, pg_get_constraintdef(oid) AS definition FROM pg_constraint "
+                "WHERE conname IN "
+                "('ck_transfers_amount_positive', 'ck_transfers_amount_within_cap')"
+            )
+        ).all()
+    }
+
+    assert set(definitions) == {
+        "ck_transfers_amount_positive",
+        "ck_transfers_amount_within_cap",
+    }, f"a constraint the service mirrors is missing: {sorted(definitions)}"
+
+    assert str(MAX_AMOUNT) in definitions["ck_transfers_amount_within_cap"], (
+        f"the database caps amounts at {definitions['ck_transfers_amount_within_cap']!r}, "
+        f"the service caps them at {MAX_AMOUNT}"
+    )
+
+    probes = [1, MAX_AMOUNT, 0, -1, MAX_AMOUNT + 1]
+    for probe in probes:
+        try:
+            _check_amount(probe)
+            accepted_by_service = True
+        except AmountOutOfRangeError:
+            accepted_by_service = False
+
+        accepted_by_postgres = connection.execute(
+            text("SELECT :candidate > 0 AND :candidate <= :cap"),
+            {"candidate": probe, "cap": MAX_AMOUNT},
+        ).scalar_one()
+
+        assert accepted_by_service == accepted_by_postgres, (
+            f"the service and the database disagree about an amount of {probe}: "
+            f"service accepts={accepted_by_service}, database accepts={accepted_by_postgres}"
+        )

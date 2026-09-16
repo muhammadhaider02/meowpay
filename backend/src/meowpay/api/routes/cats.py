@@ -28,7 +28,7 @@ from fastapi import APIRouter, Response, status
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-from meowpay.api.deps import ClaimsDep, Sessions
+from meowpay.api.deps import ClaimsDep, CurrentCatDep, Sessions
 from meowpay.api.schemas import CatResponse, OnboardRequest
 from meowpay.constants import HANDLE_REGEX, RESERVED_HANDLE_PREFIX
 from meowpay.errors import (
@@ -102,6 +102,45 @@ def normalise_display_name(raw: str) -> str:
     return raw
 
 
+MAX_DIRECTORY = 200
+
+
+@router.get(
+    "",
+    response_model=list[CatResponse],
+    summary="Cats that can receive treats",
+)
+def directory(cat: CurrentCatDep, factory: Sessions) -> list[CatResponse]:
+    """The recipient picker, and nothing more.
+
+    Depends on `CurrentCatDep` rather than `ClaimsDep`, so an identity that has
+    not onboarded cannot enumerate the cats it could send to before it is one.
+
+    Excludes system accounts, which is what keeps the treasury out, and excludes
+    the caller, because a self transfer is refused and offering it in a picker
+    invites the error rather than preventing it.
+
+    No balances, ever. `CatResponse` has no such field: a directory that reported
+    them would tell every signed-in cat exactly who is worth stealing from.
+
+    Capped rather than paginated. A picker with two hundred entries needs a
+    search box, not a second page, and this exercise has three cats. The cap is
+    here so the query cannot degrade into an unbounded scan if that stops being
+    true, not because anyone expects to reach it.
+    """
+    with factory() as session:
+        rows = session.execute(
+            select(Cat.id, Cat.handle, Cat.display_name)
+            .where(~Cat.is_system, Cat.id != cat.id)
+            .order_by(Cat.handle)
+            .limit(MAX_DIRECTORY)
+        ).all()
+
+    return [
+        CatResponse(id=row.id, handle=row.handle, display_name=row.display_name) for row in rows
+    ]
+
+
 @router.post(
     "",
     response_model=CatResponse,
@@ -172,6 +211,4 @@ def onboard(
         raise CatAlreadyExistsError(existing.handle)
 
     response.status_code = status.HTTP_200_OK
-    return CatResponse(
-        id=existing.id, handle=existing.handle, display_name=existing.display_name
-    )
+    return CatResponse(id=existing.id, handle=existing.handle, display_name=existing.display_name)

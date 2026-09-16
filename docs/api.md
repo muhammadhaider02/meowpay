@@ -1,0 +1,306 @@
+# MeowPay API
+
+Seven endpoints. Everything that moves treats goes through the ledger, and the
+ledger is the only writer of `cats.balance`, `transfers` and `entries`.
+
+Interactive docs are served at `/docs`. This file carries what an OpenAPI schema
+structurally cannot: idempotency semantics, the two-success-code contract, and
+the reason a valid token with no cat is a 403 rather than a 401.
+
+## Base URL and versioning
+
+| | |
+|---|---|
+| Versioned surface | `/api/v1` |
+| Health | `/health`, deliberately **unversioned** |
+
+Health sits outside the prefix so a liveness probe does not move when the API
+version does.
+
+## Authentication
+
+Every endpoint except `/health` needs a Supabase access token:
+
+```
+Authorization: Bearer <access token>
+```
+
+Tokens are minted by Supabase Auth, never by this service. They are asymmetric,
+ES256 or RS256, verified against the project JWKS, so the API holds only a public
+key and a compromise of it cannot mint a session. The accepted algorithm list is fixed in
+code and never read from the token header.
+
+Get the token in a browser with `supabase.auth.getSession()`, immediately before
+each request rather than captured at mount, because supabase-js refreshes in the
+background.
+
+Two things worth knowing about the window:
+
+- Access tokens live **900 seconds**, plus 30 seconds of clock leeway.
+- There is no per-request introspection, so signing out revokes the refresh
+  token and the outstanding access token stays valid until it expires.
+
+## Errors
+
+Every failure, including a 404 on a mistyped path and a 500, returns the same
+envelope:
+
+```json
+{
+  "error": {
+    "code": "insufficient_funds",
+    "message": "Balance is 50 treats, which is short of 500.",
+    "request_id": "0f4c8e2a-1b3d-4a5e-9c7f-2d8b6a1e4f93"
+  }
+}
+```
+
+**Branch on `code`, never on the HTTP status.** A status can change without
+breaking a client; these strings will not. `request_id` is echoed in the
+`X-Request-ID` response header and is what to quote when reporting a problem.
+
+| `code` | Status | Meaning |
+|---|---|---|
+| `unauthenticated` | 401 | No bearer token, or the header was not `Bearer` |
+| `invalid_token` | 401 | Signature, issuer, audience or claims rejected |
+| `token_expired` | 401 | Past `exp`. Refresh and retry |
+| `auth_unavailable` | 503 | The key set could not be fetched. **Ours, not yours** |
+| `cat_not_onboarded` | 403 | Valid token, no cat yet. `POST /api/v1/cats` first |
+| `handle_invalid` | 422 | Malformed or reserved handle |
+| `display_name_invalid` | 422 | Control characters in the display name |
+| `handle_taken` | 409 | Another cat holds it |
+| `cat_already_exists` | 409 | This identity already has a cat, under another handle |
+| `validation_error` | 422 | Body failed schema validation |
+| `amount_out_of_range` | 422 | Not an integer in `1 .. 1000000000000` |
+| `idempotency_key_invalid` | 422 | Missing, or not 8 to 255 characters |
+| `idempotency_key_reused` | 409 | Same key, different movement |
+| `self_transfer` | 422 | Sender and recipient are the same cat |
+| `treasury_is_not_a_party` | 422 | The treasury cannot send or receive a transfer |
+| `recipient_not_found` | 404 | No such cat |
+| `sender_not_found` | 404 | The sending cat vanished mid-settlement |
+| `insufficient_funds` | 422 | Balance is lower than the amount |
+| `balance_limit_exceeded` | 422 | The movement would exceed the safe integer range |
+| `ledger_busy` | 503 | Lock contention. **Retryable**, with the same key |
+| `not_found` / `method_not_allowed` | 404 / 405 | Routing |
+| `internal_error` | 500 | A bug. The detail is in the log under this request id |
+
+A 401 also carries `WWW-Authenticate: Bearer`.
+
+### `auth_unavailable` is not `invalid_token`
+
+Failing to fetch the key set is our problem; a token that does not match a key we
+did fetch is the caller's. A 401 on a Supabase blip would bounce every signed-in
+user to the login screen and make the blip worse, so that case is a **503** and a
+client should retry rather than sign the user out.
+
+## Idempotency
+
+Both money-moving endpoints require a header:
+
+```
+Idempotency-Key: <8 to 255 characters>
+```
+
+**Generate it once per intent, not per attempt.** Hold it in a ref when the send
+form opens and reuse it on every retry of that same send. A key regenerated on
+retry turns the guarantee off and is how a double spend happens.
+
+Send the header **exactly once**. Two `Idempotency-Key` headers on one request is
+`422 idempotency_key_invalid`, because which movement is being retried would
+otherwise be decided silently by whichever value the framework happened to keep.
+
+| | |
+|---|---|
+| Fresh movement | **201**, `replayed: false` |
+| Same key, same movement | **200**, `replayed: true`, nothing moves |
+| Same key, different movement | **409** `idempotency_key_reused` |
+
+The key is unique **per cat**, not globally, so two cats may use the same string
+without colliding.
+
+**A failed transfer does not consume its key.** This is the opposite of Stripe
+and it is deliberate: a cat that overdraws, tops up and retries the same intent
+succeeds rather than being told the key is spent.
+
+On a replay, `balance_after` is the balance as it stood **when the movement
+originally settled**, not the balance now. Repeating a week-old request returns a
+week-old number. `GET /api/v1/me` is the only source of a current balance.
+
+## Amounts
+
+Integers only, in whole treats, from `1` to `1000000000000`. No floats and no
+numeric strings: `1.5`, `"100"` and `true` are all rejected by the schema. Every
+balance is bounded to the JavaScript safe integer range, so a client can hold one
+in a `number` without silent precision loss.
+
+---
+
+# Endpoints
+
+## `GET /health`
+
+Unauthenticated. Reads the treasury row rather than `SELECT 1`, so a database
+that is reachable but **unmigrated** reports unhealthy instead of pretending.
+
+```json
+{ "status": "healthy", "version": "0.1.0", "database": "healthy" }
+```
+
+`version` comes from the installed package metadata, and is the string
+`"unknown"` when running from a source tree with nothing installed.
+
+`200` when healthy, `503` otherwise. The body has the same shape either way.
+
+## `POST /api/v1/cats`
+
+Create the cat for the signed-in account. Needs a verified token and, by
+definition, **not** an existing cat.
+
+```json
+{ "handle": "dahlia", "display_name": "Dahlia" }
+```
+
+A handle is 3 to 32 characters of `a-z`, `0-9` and `_`. It is lowercased for you,
+so `Dahlia` is accepted and stored as `dahlia`. Handles beginning `meowpay_` are
+reserved and refused as `handle_invalid` rather than `handle_taken`, so the
+response never confirms whether such a row exists.
+
+| Status | When |
+|---|---|
+| **201** | Created |
+| **200** | Same identity, same handle. Safe to call on every page load |
+| **409** `cat_already_exists` | This identity already has a cat, under another handle. Not a rename endpoint |
+| **409** `handle_taken` | Another identity holds it |
+
+Two simultaneous sign-ups on one handle resolve to one 201 and one 409, never two
+201s.
+
+## `GET /api/v1/cats`
+
+The recipient picker. Other cats that can receive treats, by handle, ordered by
+handle and **capped at 200** with no pagination. A picker that long needs a search
+box rather than a second page; the cap is there so the query cannot degrade into
+an unbounded scan.
+
+Requires an onboarded cat, so an identity cannot enumerate the directory before
+it is one. Excludes the treasury and excludes you, because a self transfer is
+refused and offering it in a picker invites the error. **No balances**: a
+directory reporting them would tell every cat who is worth robbing.
+
+```json
+[{ "id": "...", "handle": "milo", "display_name": "Milo" }]
+```
+
+## `GET /api/v1/me`
+
+The signed-in cat, with its balance. The **only** endpoint that reports one, so
+there is exactly one place that can report a stale one.
+
+```json
+{ "id": "...", "handle": "dahlia", "display_name": "Dahlia", "balance": 1380 }
+```
+
+The balance is read outside any lock and is true as of the read and no longer.
+Never make a spending decision on it: the ledger rechecks funds under a row lock,
+and that is the only check that counts.
+
+## `POST /api/v1/transfers`
+
+Send treats to another cat. **The sender is the token holder** and can never be
+named in the body; an unknown field is a 422 rather than a silent no-op.
+
+```
+Idempotency-Key: send-3f9a2c14
+```
+```json
+{ "to_handle": "milo", "amount": 120 }
+```
+
+Response, `201` or `200`:
+
+```json
+{
+  "id": "6b1e...",
+  "kind": "transfer",
+  "amount": 120,
+  "idempotency_key": "send-3f9a2c14",
+  "balance_after": 380,
+  "created_at": "2026-09-16T10:31:22.481Z",
+  "replayed": false
+}
+```
+
+Refusals: `insufficient_funds`, `self_transfer`, `recipient_not_found`,
+`sender_not_found`, `handle_invalid` (including the reserved treasury handle),
+`treasury_is_not_a_party`, `amount_out_of_range`, `balance_limit_exceeded`,
+`idempotency_key_invalid`, `idempotency_key_reused`, `ledger_busy`.
+
+## `POST /api/v1/deposits`
+
+Top up the signed-in cat from the treasury. **No recipient field**: a deposit
+credits the caller, resolved from the token. Accepting a target would let anyone
+mint treats into anyone else's account.
+
+```
+Idempotency-Key: topup-8d2b0197
+```
+```json
+{ "amount": 500 }
+```
+
+Same response shape as a transfer, with `"kind": "deposit"`.
+
+> Deliberately open. There is no payment step and no per-deposit cap beyond the
+> ledger's own ceiling. This endpoint stands in for a payment rail that is out of
+> scope, and a fake card form would be a worse kind of dishonest than saying so.
+
+The treasury goes negative by exactly this amount, which is what keeps every
+entry in the ledger summing to zero.
+
+## `GET /api/v1/me/entries`
+
+The statement: the signed-in cat's ledger lines, newest first.
+
+| Query | Default | Notes |
+|---|---|---|
+| `limit` | 20 | 1 to 100 |
+| `before` | — | Cursor. Pass back `next_before`, never construct it |
+
+```json
+{
+  "entries": [
+    {
+      "id": 412,
+      "transfer_id": "6b1e...",
+      "kind": "transfer",
+      "amount": -120,
+      "balance_after": 380,
+      "counterparty_handle": "milo",
+      "counterparty_display_name": "Milo",
+      "created_at": "2026-09-16T10:31:22.481Z"
+    }
+  ],
+  "next_before": 411
+}
+```
+
+`amount` is **signed** from this cat's point of view: negative debits, positive
+credits. The same movement appears on the counterparty's statement with the
+opposite sign, which is the double entry.
+
+`next_before` is `null` on the last page. Keyset pagination rather than OFFSET,
+because this is a live money feed: an offset would skip or repeat rows whenever a
+movement lands between requests.
+
+---
+
+## What is not here
+
+No endpoint deletes a cat, reverses a movement or edits a balance. Balances move
+only through `POST /api/v1/transfers` and `POST /api/v1/deposits`, and the
+`entries` table is append-only. Reversing a movement would be a compensating
+movement in the other direction, which this slice does not implement.
+
+The database itself is not reachable from a browser. The tables live in a private
+`meowpay` schema that PostgREST does not expose, with row level security enabled
+and no policies. See [decisions.md](decisions.md#where-the-tables-live).

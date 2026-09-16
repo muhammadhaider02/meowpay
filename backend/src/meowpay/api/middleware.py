@@ -102,15 +102,24 @@ def add_middleware(app: FastAPI) -> None:
     app.add_middleware(UnhandledErrorMiddleware)
     app.add_middleware(
         CORSMiddleware,
-        # An explicit origin list, never a wildcard. The access token travels in
-        # an httpOnly cookie, and with credentials enabled Starlette echoes the
-        # request origin back rather than sending "*", so a wildcard would fail
-        # open and allow every site on the internet. config.cors_origins()
-        # refuses "*" outright for that reason.
+        # An explicit origin list, never a wildcard. config.cors_origins()
+        # refuses "*" outright. The token travels in an Authorization header, so
+        # this is not what stops a hostile site reading a response: a
+        # cross-origin fetch cannot set that header without a preflight, and the
+        # preflight is what this list refuses. Free blast-radius control either
+        # way, and the wildcard would throw it away for nothing.
         allow_origins=config.cors_origins(),
-        allow_credentials=True,
+        # False, because there are no credentialed requests. The browser sends no
+        # cookie here and the token is attached by our own client code. Enabling
+        # it would ask Starlette to echo the origin back and permit credentials
+        # that do not exist.
+        allow_credentials=False,
         allow_methods=["*"],
-        allow_headers=["*"],
+        # Named rather than "*". Starlette answers a preflight by echoing the
+        # requested headers, so the wildcard is not currently broken, but it
+        # documents nothing and would silently start allowing whatever a future
+        # client asks for.
+        allow_headers=["Authorization", "Content-Type", "Idempotency-Key", "X-Request-ID"],
         # Without this the browser hides X-Request-ID from cross-origin
         # JavaScript, making the correlation id unreadable by the client it
         # exists for.

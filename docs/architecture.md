@@ -57,6 +57,7 @@ meowpay/
 ├── README.md
 │
 ├── docs/
+│   ├── api.md                       # every endpoint, and the wire contract
 │   ├── architecture.md              # this file
 │   └── decisions.md                 # what was chosen, what was skipped, why
 │
@@ -92,8 +93,10 @@ meowpay/
     │       ├── schemas.py
     │       └── routes/
     │           ├── __init__.py       # the /api/v1 router everything mounts on
-    │           ├── cats.py           # onboarding
-    │           └── health.py
+    │           ├── cats.py           # onboarding, and the recipient picker
+    │           ├── health.py
+    │           ├── me.py             # balance and statement
+    │           └── movements.py      # transfers and deposits
     │
     └── tests/
         ├── conftest.py
@@ -129,9 +132,11 @@ meowpay/
 | `app.py` | `create_app()` builds the FastAPI app and mounts middleware and routers. `serve()` is the `meowpay-api` console script: reads `API_HOST`/`API_PORT`, runs uvicorn by import string with `factory=True` so `--reload` has something to re-import. |
 | `deps.py` | `sessions`, `ledger` and `verifier`, plus `claims` and `get_current_cat`. Routes reach all of them through `Depends` and never by import, which is what lets a test redirect them. `claims` and `get_current_cat` are deliberately separate: onboarding needs a verified caller and by definition has no cat row yet, so it can never depend on one. `HTTPBearer(auto_error=False)` because the default raises FastAPI's own 403 with a `{"detail": ...}` body the frontend cannot branch on. Both are plain `def` and never `async def`, because the key fetch is blocking and would otherwise stall the event loop. |
 | `middleware.py` | Effective chain `RequestID -> CORS -> UnhandledError -> route`. `RequestIDMiddleware` accepts an inbound `X-Request-ID` only if it parses as a UUID, else replaces it, and echoes it on the response. `UnhandledErrorMiddleware` renders the 500 envelope. It is middleware and not an exception handler because Starlette hoists a bare `Exception` handler to `ServerErrorMiddleware`, outside CORS, and the browser would then block every 500 so the frontend could not read the `code` it branches on. |
-| `schemas.py` | `HealthResponse`, `HealthStatus`, and `ErrorResponse`, the error envelope. |
+| `schemas.py` | Every wire shape. Requests are `strict` and `extra="forbid"`, so a body carrying a field we do not read is a loud 422 rather than a silent no-op. Amounts are deliberately **not** bounded here: `ledger._check_amount` mirrors the CHECK constraints and a second bound would be a second thing to forget. |
 | `errors.py` | The exception handlers, and the one place the envelope is built. Registered for the `AppError` base, so Starlette's `__mro__` walk covers every subclass. Also rewrites FastAPI's own `RequestValidationError` and 404/405, which otherwise return `{"detail": ...}` and would give the frontend two error shapes to parse. |
-| `routes/cats.py` | `POST /api/v1/cats`, onboarding. Depends on a verified token and **not** on `get_current_cat`, because the caller has no cat row yet. Claim-then-read with `ON CONFLICT DO NOTHING`, which waits on a conflicting in-flight insert rather than skipping it, so two simultaneous sign-ups on one handle give one 201 and one 409. |
+| `routes/cats.py` | `GET /api/v1/cats`, the recipient picker: other cats by handle, no balances, treasury and caller excluded. And `POST /api/v1/cats`, onboarding. Depends on a verified token and **not** on `get_current_cat`, because the caller has no cat row yet. Claim-then-read with `ON CONFLICT DO NOTHING`, which waits on a conflicting in-flight insert rather than skipping it, so two simultaneous sign-ups on one handle give one 201 and one 409. |
+| `routes/movements.py` | `POST /api/v1/transfers` and `POST /api/v1/deposits`. Thin on purpose: every rule about what may move lives in the ledger, and every rejection it raises already carries its own code and status, so there is no error translation here. The sender is always the token holder and never a request field. 201 fresh, 200 on replay. |
+| `routes/me.py` | `GET /api/v1/me`, the only endpoint that reports a balance, read fresh rather than from the dependency. And `GET /api/v1/me/entries`, the statement, keyset paginated on `(cat_id, id DESC)` because OFFSET would skip or repeat rows on a live feed. |
 | `routes/health.py` | `GET /health`. Reads the treasury row rather than `SELECT 1`, so a reachable but unmigrated database reports unhealthy. 200 when healthy, 503 otherwise. Version from package metadata, falling back to `unknown`. |
 
 ### The error envelope
@@ -248,7 +253,11 @@ Read from `backend/.env`. See `backend/.env.example`.
 | `test_schema.py` | Every constraint above, driven by raw SQL so the database refuses them even when the application is wrong |
 | `test_auth_tokens.py` | The verifier, with a locally generated ES256 key pair. **No database and no network**, so these run anywhere. Algorithm confusion, `alg: none`, wrong issuer, wrong audience, expiry, a non-uuid subject, anonymous users, unknown `kid`, clock skew, and the ours-versus-theirs split between an unreachable key set (503) and a kid that is genuinely absent (401) |
 | `test_handles.py` | `normalise_handle` and `normalise_display_name`, called directly. No database, no network. These exist because `OnboardRequest` strips and bounds its input before the route runs, so several guards are **unreachable** from an endpoint test and were deletable with every endpoint test still green |
+| `test_movements_api.py` | Transfers and deposits over HTTP, with the ledger and the database real. The sender coming from the token and not the body, replay as a 200, a ledger refusal arriving in the envelope with CORS headers, and the 403 that `CurrentCatDep` could not fire until these routes existed |
+| `test_history_api.py` | Balance, statement and directory. Double entry seen from both sides, the keyset walk paging to the end without repeating a row, and the directory excluding the caller and the treasury |
 | `test_onboarding.py` | `POST /api/v1/cats` over HTTP with only the cryptography stubbed, so the cat lookup, the 403, the handle collisions and the envelope all run for real |
+| `test_ledger.py` | Settlement, idempotent replay, every typed rejection, and reconciliation. Two tests assert on the **emitted SQL** rather than behaviour, because `ORDER BY` and `FOR NO KEY UPDATE` are plan-shape properties whose absence shows up as a deadlock under load and never in a functional test |
+| `test_ledger_concurrency.py` | Eight threads on real connections with real commits: one key settles exactly once, eight transfers cannot overdraw, opposing transfers do not deadlock, and the ledger still reconciles afterwards. Plus the `lock_timeout` to `55P03` to 503 chain |
 
 ### The guard that `alembic check` does not provide
 
@@ -262,8 +271,19 @@ the same strings and requires them to agree. Without it, widening
 `HANDLE_REGEX` by one character leaves `alembic check` clean and the suite green
 while the endpoint returns 500 on a handle the service accepts and the database
 refuses.
-| `test_ledger.py` | Settlement, idempotent replay, every typed rejection, and reconciliation. Two tests assert on the **emitted SQL** rather than behaviour, because `ORDER BY` and `FOR NO KEY UPDATE` are plan-shape properties whose absence shows up as a deadlock under load and never in a functional test |
-| `test_ledger_concurrency.py` | Eight threads on real connections with real commits: one key settles exactly once, eight transfers cannot overdraw, opposing transfers do not deadlock, and the ledger still reconciles afterwards. Plus the `lock_timeout` to `55P03` to 503 chain |
+
+Two more pairs are guarded the same way, and both became reachable by a caller
+the moment the HTTP surface existed:
+
+| Python | SQL constraint |
+|---|---|
+| `normalise_handle` / `HANDLE_REGEX` | `ck_cats_handle_shape` |
+| `_check_idempotency_key`, 8 to 255 | `ck_transfers_idempotency_key_shape` |
+| `_check_amount` / `MAX_AMOUNT` | `ck_transfers_amount_positive`, `ck_transfers_amount_within_cap` |
+
+Each test reads `pg_get_constraintdef` and then asks both sides about the same
+values. Any Python validator added later that mirrors a `CHECK` needs one too;
+`make check` will not catch it.
 
 ### Why the concurrency tests cannot pass vacuously
 

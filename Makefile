@@ -1,4 +1,4 @@
-.PHONY: help dev install migrate seed revision serve lint format typecheck test test-fast all
+.PHONY: help dev install migrate seed revision serve lint format typecheck check test test-fast all
 
 # Every recipe keeps `cd backend && ...` on a single line on purpose. Make runs each
 # recipe line in a fresh shell, and on Windows that shell is cmd.exe rather than
@@ -49,6 +49,14 @@ format:
 
 typecheck:
 	cd backend && uv run mypy src/ tests/
+
+# Two commit messages cite this as the guard that models.py and the migrations
+# cannot drift apart, so it needs to be one command rather than folklore. Note
+# what it does NOT cover: alembic does not reflect or compare CHECK constraint
+# bodies, so a regex that drifts from its constraint passes this cleanly. The
+# tests in test_schema.py that read pg_get_constraintdef are what cover that.
+check:
+	cd backend && uv run alembic check
 
 test:
 	cd backend && uv run pytest

@@ -11,7 +11,7 @@
 
 A digital wallet for cats. Humans top it up, cats send each other treats.
 
-[Architecture](docs/architecture.md) · [Decisions](docs/decisions.md)
+[API](docs/api.md) · [Architecture](docs/architecture.md) · [Decisions](docs/decisions.md)
 
 </div>
 
@@ -59,6 +59,26 @@ ledger rather than by writing balances, so a freshly seeded database reconciles.
 database and whether that database has been migrated. Interactive docs at
 <http://localhost:8000/docs>.
 
+### The endpoints
+
+Everything but `/health` needs `Authorization: Bearer <supabase access token>`.
+The full contract, including the idempotency rules and every error code, is in
+[docs/api.md](docs/api.md).
+
+| | |
+|---|---|
+| `GET /health` | Reachable, and migrated |
+| `POST /api/v1/cats` | Claim a handle for the signed-in account |
+| `GET /api/v1/cats` | Who you can send to |
+| `GET /api/v1/me` | The signed-in cat, with its balance |
+| `GET /api/v1/me/entries` | Statement, newest first |
+| `POST /api/v1/transfers` | Send treats |
+| `POST /api/v1/deposits` | Top up from the treasury |
+
+Both `POST`s require an `Idempotency-Key` header. Generate it once per intent and
+reuse it on every retry of that intent: that is what makes a retry safe, and
+regenerating it on retry is how a double spend happens.
+
 The migrations create a `meowpay` schema and put the three tables in it, rather
 than using `public`. That is a security decision and not tidiness:
 [why](docs/decisions.md#where-the-tables-live).
@@ -79,6 +99,7 @@ dependency:
 | `lint` | `cd backend && uv run ruff check src/ tests/` |
 | `format` | `cd backend && uv run ruff format src/ tests/` |
 | `typecheck` | `cd backend && uv run mypy src/ tests/` |
+| `check` | `cd backend && uv run alembic check` |
 | `test` | `cd backend && uv run pytest` |
 | `test-fast` | `cd backend && uv run pytest -m "not concurrency"` |
 | `all` | lint, typecheck and test |
@@ -88,7 +109,14 @@ There is no `clean`. To roll the schema back:
 
 ## Development
 
-`make all` runs lint, typecheck and tests.
+`make all` runs lint, typecheck and tests. `make check` runs `alembic check`
+separately, because it needs a reachable database and would turn the deliberate
+skip below into a hard failure.
+
+Note that `alembic check` does **not** compare CHECK constraint bodies, so a
+Python validator that drifts from its constraint passes it cleanly. The tests
+that read `pg_get_constraintdef` are what cover that:
+[the guard](docs/architecture.md#the-guard-that-alembic-check-does-not-provide).
 
 Tests needing a database create their own throwaway `meowpay_test` database on
 the same Supabase project, migrate it with Alembic and drop it afterwards. The

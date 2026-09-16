@@ -347,15 +347,3 @@ class CatAlreadyExistsError(AppError):
 
     def __init__(self, handle: str) -> None:
         super().__init__(f"This account already has a cat, {handle!r}.")
-
-
-class ValidationError(AppError):
-    """A malformed request body, rendered into our envelope.
-
-    FastAPI's own RequestValidationError returns {"detail": [...]}, which is not
-    the shape the frontend branches on. Registering a handler that raises this
-    instead keeps one error contract across the whole API.
-    """
-
-    code = "validation_error"
-    status = 422
