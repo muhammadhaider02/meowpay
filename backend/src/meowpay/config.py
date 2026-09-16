@@ -126,8 +126,10 @@ def test_database_url() -> str:
     override = os.getenv("TEST_DATABASE_URL")
     if override:
         return _normalise(override)
-    return make_url(database_url()).set(database=TEST_DATABASE_NAME).render_as_string(
-        hide_password=False
+    return (
+        make_url(database_url())
+        .set(database=TEST_DATABASE_NAME)
+        .render_as_string(hide_password=False)
     )
 
 

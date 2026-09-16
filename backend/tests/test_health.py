@@ -13,8 +13,6 @@ from meowpay.api.deps import sessions
 pytestmark = pytest.mark.db
 
 
-
-
 def test_health_is_healthy_when_the_database_is_migrated(client: TestClient) -> None:
     # Asserted unconditionally, and it must stay that way. Skipping on a 503
     # here would mean a genuinely broken /health reports itself as the

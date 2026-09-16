@@ -308,9 +308,7 @@ def test_the_real_client_is_built_with_a_refetch_cooldown() -> None:
     from meowpay import auth
 
     assert "cooldown_duration" in inspect.signature(auth.PyJWKClient.__init__).parameters
-    assert "cooldown_duration=UNKNOWN_KID_COOLDOWN_SECONDS" in inspect.getsource(
-        auth.get_verifier
-    )
+    assert "cooldown_duration=UNKNOWN_KID_COOLDOWN_SECONDS" in inspect.getsource(auth.get_verifier)
 
 
 def test_the_per_key_cache_is_off_so_a_revoked_key_stops_working() -> None:

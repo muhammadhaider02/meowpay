@@ -44,9 +44,7 @@ def test_onboarding_without_a_token_is_401_in_the_envelope(client: TestClient) -
     registered for a specific exception class precisely so its response travels
     back out through CORSMiddleware.
     """
-    response = client.post(
-        ONBOARD, json=_body(), headers={"Origin": "http://localhost:3000"}
-    )
+    response = client.post(ONBOARD, json=_body(), headers={"Origin": "http://localhost:3000"})
 
     assert response.status_code == 401
     assert response.json()["error"]["code"] == "unauthenticated"
@@ -106,7 +104,7 @@ def test_a_valid_token_resolves_to_its_own_cat(
 
 
 def test_the_treasury_cannot_be_resolved_from_any_identity(
-    sessions_factory: sessionmaker[Session]
+    sessions_factory: sessionmaker[Session],
 ) -> None:
     """Structural, not conventional.
 
@@ -205,9 +203,7 @@ def test_a_handle_another_cat_holds_is_refused(
 # -- handle rules ----------------------------------------------------------
 
 
-def test_a_handle_is_normalised_to_lowercase(
-    client: TestClient, as_identity: AsIdentity
-) -> None:
+def test_a_handle_is_normalised_to_lowercase(client: TestClient, as_identity: AsIdentity) -> None:
     as_identity()
 
     response = client.post(ONBOARD, json=_body("Dahlia", "Dahlia"))

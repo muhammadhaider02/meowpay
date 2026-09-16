@@ -78,9 +78,7 @@ def _find_user(client: httpx.Client, email: str) -> str | None:
     loop.
     """
     for page in range(1, 11):
-        response = _admin(
-            client, "GET", "/admin/users", params={"page": page, "per_page": 1000}
-        )
+        response = _admin(client, "GET", "/admin/users", params={"page": page, "per_page": 1000})
         response.raise_for_status()
         users = response.json().get("users", [])
         if not users:
@@ -92,9 +90,7 @@ def _find_user(client: httpx.Client, email: str) -> str | None:
             # such user anywhere in the project would break every recovery.
             if (user.get("email") or "").lower() == email.lower():
                 return str(user["id"])
-    raise RuntimeError(
-        f"Could not find {email} after 10 pages of auth users. Refusing to guess."
-    )
+    raise RuntimeError(f"Could not find {email} after 10 pages of auth users. Refusing to guess.")
 
 
 def _ensure_auth_user(client: httpx.Client, handle: str, display_name: str) -> str:
@@ -153,7 +149,9 @@ def _ensure_auth_user(client: httpx.Client, handle: str, display_name: str) -> s
             "relax the password policy under Authentication, Sign In / Providers."
         )
 
-    raise RuntimeError(f"Could not create the auth user for {handle}: {response.status_code} {body}")
+    raise RuntimeError(
+        f"Could not create the auth user for {handle}: {response.status_code} {body}"
+    )
 
 
 def main() -> None:

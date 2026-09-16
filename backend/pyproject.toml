@@ -31,7 +31,10 @@ dependencies = [
 [dependency-groups]
 dev = [
     "pytest>=8.0",
-    "ruff>=0.11",
+    # Pinned exactly, not floated, because .pre-commit-config.yaml names a
+    # ruff version too and a formatter that disagrees with itself rewrites
+    # files the other half just approved.
+    "ruff==0.16.7",
     "mypy>=1.15",
     "pre-commit>=4.0",
 ]

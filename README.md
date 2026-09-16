@@ -113,6 +113,20 @@ There is no `clean`. To roll the schema back:
 separately, because it needs a reachable database and would turn the deliberate
 skip below into a hard failure.
 
+Run this once per clone, before the first commit:
+
+```bash
+cd backend && uv run pre-commit install
+```
+
+Without it the hygiene hooks are configuration and nothing else. They lint,
+format and catch trailing whitespace, missing final newlines, unparseable YAML,
+files over 500kb, committed private keys and merge conflict markers, and they
+run on commit rather than in CI so the history is clean rather than reported on
+afterwards. Ruff is pinned to one exact version in both
+`.pre-commit-config.yaml` and `backend/pyproject.toml`, because a formatter that
+disagrees with itself rewrites the files the other half just approved.
+
 Note that `alembic check` does **not** compare CHECK constraint bodies, so a
 Python validator that drifts from its constraint passes it cleanly. The tests
 that read `pg_get_constraintdef` are what cover that:

@@ -50,6 +50,8 @@ covers what exists. The map of what exists is in
 | **The recipient picker carries no balances** | A directory that reported them would tell every signed-in cat exactly who is worth stealing from. It also excludes the caller, because offering a self transfer invites the error the ledger refuses |
 | **Routes translate no errors** | Every ledger and auth rejection already carries its own `code` and status. A `try/except` in a route would be a second place where the status for insufficient funds is decided |
 | **A repeated `Idempotency-Key` header is refused** | FastAPI hands a `str`-typed header only the first value and drops the rest, so a client that sent two keys would settle under one and retry under the other. That is a double spend assembled from a header nobody looked at, so the parameter is a list and more than one value is a 422 |
+| **Ruff pinned to one exact version, written in two files** | `.pre-commit-config.yaml` and `backend/pyproject.toml` both name it, so a floating `>=` lets the hook and the CLI format the same file two different ways and each rewrites what the other approved. The dev pin is `==`, and the two change together or not at all |
+| **The ruff hooks run over `src/` and `tests/` only** | Exactly the paths `make lint` and `make format` pass. Widening the pattern reaches `migrations/`, which pyproject exempts as alembic's generated output, so the hook would restyle generated code the Makefile then leaves alone. The same divergence as an unpinned version, by path rather than by version |
 
 ## Where the tables live
 

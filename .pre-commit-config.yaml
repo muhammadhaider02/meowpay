@@ -1,12 +1,23 @@
+# Run `pre-commit install` once per clone, or none of this executes.
+#
+# The ruff rev below and the ruff pin in backend/pyproject.toml are one version,
+# written twice. Let them diverge and the hook and the CLI format the same file
+# two different ways, so each rewrites what the other just approved. Change both
+# or neither.
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.11.0
+    rev: v0.16.7
     hooks:
-      - id: ruff
+      # Scoped to src and tests, which is exactly what `make lint` and
+      # `make format` pass. Widening this to ^backend/ pulls in migrations/,
+      # which pyproject exempts as alembic's generated output, so the hook would
+      # restyle generated code the Makefile then leaves alone. The same
+      # divergence as an unpinned version, by path instead of by version.
+      - id: ruff-check
         args: [--fix]
-        files: ^backend/
+        files: ^backend/(src|tests)/
       - id: ruff-format
-        files: ^backend/
+        files: ^backend/(src|tests)/
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
     hooks:
