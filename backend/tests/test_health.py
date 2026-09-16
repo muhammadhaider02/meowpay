@@ -2,43 +2,17 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.orm import Session, sessionmaker
 
-from meowpay.api.app import create_app
 from meowpay.api.deps import sessions
 
 pytestmark = pytest.mark.db
 
 
-@pytest.fixture
-def app(sessions_factory: sessionmaker[Session]) -> FastAPI:
-    """An app whose database is the throwaway test one, not the dev database.
-
-    Overriding the dependency is the whole reason routes reach the session
-    factory through `deps.sessions` instead of importing it. Without this the
-    endpoint would resolve the process-wide engine built from DATABASE_URL and
-    quietly read dev data.
-    """
-    application = create_app()
-    application.dependency_overrides[sessions] = lambda: sessions_factory
-    return application
-
-
-@pytest.fixture
-def client(app: FastAPI) -> Iterator[TestClient]:
-    """Not entered as a context manager, so no lifespan runs.
-
-    raise_server_exceptions=False lets the app's own error middleware produce
-    the response, which is what makes the envelope assertable.
-    """
-    with TestClient(app, raise_server_exceptions=False) as test_client:
-        yield test_client
 
 
 def test_health_is_healthy_when_the_database_is_migrated(client: TestClient) -> None:

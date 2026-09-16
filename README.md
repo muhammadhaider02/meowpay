@@ -45,8 +45,15 @@ since newer projects sit behind `aws-1-<region>` and older ones behind `aws-0-`.
 
 ```bash
 make dev        # install dependencies, then migrate
+make seed       # three demo cats, with logins, funded through the ledger
 make serve      # api on http://localhost:8000
 ```
+
+`make seed` needs `SUPABASE_URL` and `SUPABASE_SECRET_KEY` as well, because it
+creates the Supabase auth users the cats sign in as. It prints the email and
+password for each. Lotus starts with nothing on purpose, so a rejected transfer
+can be demonstrated without editing data first. All three are funded through the
+ledger rather than by writing balances, so a freshly seeded database reconciles.
 
 `curl localhost:8000/health` reports whether the API can actually reach the
 database and whether that database has been migrated. Interactive docs at
@@ -65,6 +72,7 @@ dependency:
 |---|---|
 | `install` | `cd backend && uv sync --group dev` |
 | `migrate` | `cd backend && uv run alembic upgrade head` |
+| `seed` | `cd backend && uv run meowpay-seed` |
 | `revision` | `cd backend && uv run alembic revision --autogenerate -m "..."` |
 | `dev` | `install` then `migrate` |
 | `serve` | `cd backend && uv run meowpay-api --reload` |

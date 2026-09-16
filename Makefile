@@ -1,4 +1,4 @@
-.PHONY: help dev install migrate revision serve lint format typecheck test test-fast all
+.PHONY: help dev install migrate seed revision serve lint format typecheck test test-fast all
 
 # Every recipe keeps `cd backend && ...` on a single line on purpose. Make runs each
 # recipe line in a fresh shell, and on Windows that shell is cmd.exe rather than
@@ -15,6 +15,7 @@
 
 help:
 	@echo "dev        install dependencies and run migrations"
+	@echo "seed       create demo cats and fund them"
 	@echo "serve      run the api with hot reload"
 	@echo "test-fast  tests, skipping the slow concurrency suite"
 	@echo "all        lint, typecheck and test"
@@ -28,6 +29,10 @@ install:
 
 migrate:
 	cd backend && uv run alembic upgrade head
+
+# Creates the Supabase auth users too, so this needs SUPABASE_SECRET_KEY.
+seed:
+	cd backend && uv run meowpay-seed
 
 # usage: make revision m="what it does"
 revision:

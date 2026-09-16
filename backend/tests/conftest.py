@@ -19,11 +19,16 @@ from typing import NoReturn
 import pytest
 from alembic import command
 from alembic.config import Config
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from sqlalchemy import Connection, Engine, create_engine, insert, make_url, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
 from meowpay import config
+from meowpay.api.app import create_app
+from meowpay.api.deps import claims, sessions
+from meowpay.auth import Claims
 from meowpay.config import BACKEND_ROOT
 from meowpay.constants import TREASURY_CAT_ID
 from meowpay.ledger import Ledger
@@ -275,6 +280,55 @@ def make_cat(sessions_factory: sessionmaker[Session]) -> Callable[..., uuid.UUID
         return cat_id
 
     return _make
+
+
+# -- the HTTP surface ------------------------------------------------------
+
+
+@pytest.fixture
+def app(sessions_factory: sessionmaker[Session]) -> FastAPI:
+    """An app whose database is the throwaway test one, not the application's.
+
+    Overriding the dependency is the whole reason routes reach the session
+    factory through `deps.sessions` instead of importing it. Without this the
+    endpoint would resolve the process-wide engine built from DATABASE_URL and
+    quietly read real data.
+    """
+    application = create_app()
+    application.dependency_overrides[sessions] = lambda: sessions_factory
+    return application
+
+
+@pytest.fixture
+def client(app: FastAPI) -> Iterator[TestClient]:
+    """raise_server_exceptions=False lets the app's own error middleware produce
+    the response, which is what makes the envelope assertable rather than having
+    the exception propagate into the test.
+    """
+    with TestClient(app, raise_server_exceptions=False) as test_client:
+        yield test_client
+
+
+@pytest.fixture
+def as_identity(app: FastAPI) -> Callable[..., Claims]:
+    """Present a verified token, without a token.
+
+    Overrides `deps.claims` and leaves `get_current_cat` real, so the parts that
+    matter still run against the database: the cat lookup, the 403 when there is
+    no cat, and the treasury being unreachable. Only the cryptography is stubbed,
+    and that has its own suite in test_auth_tokens.py which uses no database.
+    """
+
+    def _as(auth_user_id: uuid.UUID | None = None) -> Claims:
+        identity = Claims(
+            auth_user_id=auth_user_id or uuid.uuid4(),
+            email="test@meowpay.test",
+            session_id=str(uuid.uuid4()),
+        )
+        app.dependency_overrides[claims] = lambda: identity
+        return identity
+
+    return _as
 
 
 # -- concurrency -----------------------------------------------------------

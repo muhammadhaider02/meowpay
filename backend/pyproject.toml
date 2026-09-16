@@ -18,6 +18,14 @@ dependencies = [
     "psycopg[binary]>=3.2",
     "alembic>=1.16",
     "python-dotenv>=1.0",
+    # Supabase access token verification. PyJWT rather than python-jose, which
+    # Supabase's own Python sample uses: python-jose last released in 2021, is
+    # unmaintained, has had algorithm-confusion CVEs and depends on `ecdsa`,
+    # which carries a timing side-channel advisory. Not in a money service.
+    "pyjwt[crypto]>=2.10",
+    # The GoTrue admin API, used by meowpay-seed. A runtime dependency because
+    # meowpay-seed is a runtime entry point, not a test helper.
+    "httpx>=0.27",
 ]
 
 [dependency-groups]
@@ -26,8 +34,6 @@ dev = [
     "ruff>=0.11",
     "mypy>=1.15",
     "pre-commit>=4.0",
-    # fastapi.testclient.TestClient requires it
-    "httpx>=0.27",
 ]
 
 [project.scripts]

@@ -50,10 +50,14 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
-from meowpay.constants import JS_SAFE_INTEGER, MAX_AMOUNT, TREASURY_CAT_ID
+from meowpay.constants import HANDLE_REGEX, JS_SAFE_INTEGER, MAX_AMOUNT, TREASURY_CAT_ID
 from meowpay.db import Base
 
-HANDLE_PATTERN = "handle ~ '^[a-z0-9_]{3,32}$'"
+# Built from the one definition in constants.py rather than written out again,
+# so the CHECK and the service's own validation cannot drift apart. This renders
+# byte for byte what migration 0001 already contains, so alembic check is
+# unaffected.
+HANDLE_PATTERN = f"handle ~ '^{HANDLE_REGEX}$'"
 
 
 class MovementKind(enum.StrEnum):

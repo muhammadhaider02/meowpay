@@ -22,6 +22,17 @@ covers what exists. The map of what exists is in
 | **Identity is `auth_user_id`, with no foreign key to `auth.users`** | A cat outlives its login: deleting an identity must not delete a money account. A foreign key would also force every test fixture to create a real `auth.users` row, dragging the auth server into the schema suite. `auth.users` is Supabase's to change, not ours to depend on |
 | **Throwaway test database, not a test schema** | Supabase allows it: `postgres` has `CREATEDB`, the pooler routes to the new database and `DROP ... WITH (FORCE)` works against a live session. Measured, not assumed. A whole database means no routing mistake in `conftest.py` can reach the application's rows |
 | **Alembic, not Supabase migrations** | `models.py` stays the single source of truth and `alembic check` catches drift. One migration tool rather than two that can disagree |
+| **Asymmetric ES256 tokens, verified against JWKS** | With a shared HS256 secret this service would hold the key GoTrue **mints** with, so anyone who could read the deployment environment could forge a token for any cat. With an asymmetric key it holds only the public half, so a full compromise still cannot mint a session. Rotation also becomes a dashboard action rather than a coordinated secret change |
+| **Accepted algorithms are fixed at construction, never read from the token header** | The key set is public by design, so an attacker can fetch the ES256 public key, use its bytes as an HMAC secret and mint an HS256 token. With HS256 in the accepted list alongside a JWKS-resolved key, that token verifies and the attacker is any cat they choose. One algorithm family per process removes it by construction rather than by care |
+| **PyJWT, not python-jose** | python-jose is what Supabase's own Python sample uses. Last released in 2021, unmaintained, has had algorithm-confusion CVEs and depends on `ecdsa`, which carries a timing side-channel advisory |
+| **No per-request token introspection** | Calling the auth server on every request would put it in the hot path of every transfer. The cost is stated under trade-offs |
+| **A key set we could not fetch is 503; a `kid` genuinely absent from one is 401** | Ours versus the caller's. PyJWT's connection error is a **subclass** of its client error, so catching the parent first reads as correct specific-before-broad ordering and turns every network failure into "your credential is bad" |
+| **30 seconds of clock leeway, not zero** | Leeway guards `iat`, not only `exp`, and `iat` is stamped on the provider's clock. Zero means one second of skew fails every authentication, reported as `invalid_token`, which tells the client to re-authenticate and mint a token with the same problem. `exp` bounds revocation, so this costs nothing |
+| **`cache_keys=False` on the JWKS client** | Enabling it adds a per-`kid` LRU cache with **no** time based expiry, sitting in front of the key set cache that `lifespan` governs. A signing key revoked at the provider would go on being honoured until the process restarted or sixteen other kids evicted it, and nothing on the Supabase side could stop it |
+| **The seed resolves cats by identity, never by handle** | The seed handles are not reserved, so anyone can claim `milo` through the onboarding endpoint. Checking the handle first and skipping looks equivalent and deposits 300 real treats into that stranger's account, out of the treasury, with an idempotency key scoped to them. Resolving the auth user first and keying off it removes the whole class |
+| **Onboarding is an endpoint, not a trigger on `auth.users`** | A trigger cannot invent a validated handle without trusting client-supplied metadata. A trigger error aborts the sign-up transaction itself, so a taken handle would make sign-up fail with GoTrue's opaque "Database error saving new user" and the identity would never be created. It is invisible to `alembic check`, and it would be a second, elevated, invisible writer of a money table |
+| **Repeating onboarding is 200, not an error** | A frontend that fires it on every load of the onboarding page is then safe. The 201 versus 200 split still tells a careful client which happened |
+| **Reserved handles are `handle_invalid`, never `handle_taken`** | `handle_taken` would confirm which rows exist. It also stops anyone registering `meowpay_support` and phishing from a name that looks official |
 | **`/health` reads the treasury row, not `SELECT 1`** | `SELECT 1` passes against a reachable but unmigrated database, which is the failure a health check most needs to catch after a deploy |
 | **One settlement path for transfers and deposits** | A deposit is the same movement with the treasury as sender. One path means one place the zero-sum property can break, and one place to fix it |
 | **`Ledger` takes a `sessionmaker`, never a `Session`** | Row locks are released by COMMIT. A caller holding the session could commit mid-flight and drop them, so the ledger owns its transaction boundaries rather than borrowing someone else's |
@@ -82,28 +93,19 @@ connection.
 **`lock_timeout` goes further and is set per transaction**, as the first
 statement inside `_settle`. It is the one setting the money path depends on:
 Postgres raises `55P03` when it expires, the ledger translates that to
-`LedgerBusyError`, and the caller gets a retryable 503 instead of a hang. If it
-is silently absent, that path does not exist and a contended transfer waits out
-the 30s `statement_timeout` and fails as `57014`, which nothing translates.
-
-Scoping it to the transaction is also better than what it replaced, independently
-of the pooler. On the connection, `idle_in_transaction_session_timeout` clamped
-every session in the process, including test scaffolding that legitimately holds
-an open transaction while it waits on a barrier. Now it constrains only the
-transaction that actually holds row locks.
+`LedgerBusyError`, and the caller gets a retryable 503 instead of a hang. Absent,
+that path does not exist and a contended transfer waits out the 30s
+`statement_timeout` and fails as `57014`, which nothing translates. Scoping it to
+the transaction also keeps `idle_in_transaction_session_timeout` off the test
+scaffolding, which legitimately holds an open transaction while it waits on a
+barrier.
 
 **Eight seconds, derived rather than picked.** A settle is about seven round
 trips and the locks are held from the locking SELECT through COMMIT, so at ~50ms
 RTT each holder keeps them for roughly 300ms. Waiters queue, so with eight
 threads on one pair of rows the last waits about 7 x 300ms = 2.1s before jitter.
-Three seconds passes on a good run and fails on a bad one, which is the
-definition of a flaky test. Eight is still a defensible production ceiling.
-
-Two tests cover this, and neither existed before: one asserts the `set_config` is
-the first statement of the transaction, the other holds a conflicting lock and
-asserts both `LedgerBusyError` and that the wait landed in the expected window.
-Verified by sabotage: with the call removed, the first fails and the second
-fails as `QueryCanceled` after 30s, exactly as predicted.
+Three seconds passes on a good run and fails on a bad one. Eight is still a
+defensible production ceiling.
 
 ---
 
@@ -125,6 +127,8 @@ each is a decision rather than an oversight. This list grows with the slice.
 
 | Trade-off | Consequence |
 |---|---|
+| **A signed-out token stays valid until it expires** | Nothing is introspected per request, so signing out revokes the refresh token and not the outstanding access token. Mitigated by a 900 second token lifetime rather than the 3600 default. `session_id` is in the claims, so a denylist is the available seam if it ever needs to be tighter. This is the one real security regression from minting our own tokens, and it buys not having the auth server in the path of every transfer |
+| **Nothing in the test suite touches the real auth server** | The verifier is tested against a locally generated key pair, which is what makes those tests fast, offline and exhaustive. The cost is that no test proves Supabase's real tokens carry the claims we require. Verified by hand instead: sign in, verify, resolve to a cat |
 | **The treasury is a global write hotspot** | Every deposit locks one row, so deposits serialize. Correct at this scale. At real scale you shard it per region |
 | **A failed transfer does not consume its idempotency key** | The opposite of Stripe, and deliberate. A rejection is not a settlement, so retrying after fixing the cause should succeed rather than replay a failure. A caller who wants the Stripe behaviour can use a fresh key |
 | **The zero-sum property is not a database constraint** | It holds because `ledger.py` is the only writer, and a reconciliation test asserts it. Saying the schema guarantees it would be false |

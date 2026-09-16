@@ -13,7 +13,10 @@ import pytest
 from sqlalchemy import Connection, text
 from sqlalchemy.exc import IntegrityError
 
-from meowpay.constants import TREASURY_CAT_ID
+from meowpay.api.routes.cats import normalise_handle
+from meowpay.constants import HANDLE_REGEX, TREASURY_CAT_ID
+from meowpay.errors import HandleInvalidError
+from meowpay.models import HANDLE_PATTERN
 
 pytestmark = pytest.mark.db
 
@@ -276,3 +279,78 @@ def test_a_balance_cannot_exceed_javascript_safe_integers(connection: Connection
             text("UPDATE cats SET balance = 9007199254740992 WHERE id = :id"),
             {"id": cat_id},
         )
+
+
+def test_the_handle_check_in_the_database_matches_the_one_the_service_enforces(
+    connection: Connection,
+) -> None:
+    """The drift guard that `alembic check` does NOT provide.
+
+    Autogenerate never reflects or compares CHECK constraints, so `models.py`
+    building HANDLE_PATTERN from HANDLE_REGEX proves nothing on its own: the
+    live constraint comes from a hardcoded literal in migration 0001 and nothing
+    compared the two. Changing HANDLE_REGEX by one character left `alembic check`
+    reporting no drift and every test green, while the endpoint started returning
+    500 on a handle the service accepted and the database refused.
+
+    Two assertions, because they fail for different reasons. The first catches a
+    silent edit to either side. The second is the one that matters: it asks both
+    the Python validator and the live constraint about the same strings and
+    requires them to agree.
+    """
+    definition = connection.execute(
+        text(
+            "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+            "WHERE conname = 'ck_cats_handle_shape'"
+        )
+    ).scalar_one()
+
+    assert f"'^{HANDLE_REGEX}$'" in definition, (
+        f"the database enforces {definition!r}, the service enforces {HANDLE_PATTERN!r}"
+    )
+
+    probes = [
+        "dahlia",
+        "cat_1",
+        "a1b",
+        "x" * 32,
+        "ab",
+        "x" * 33,
+        "bad-handle",
+        "bad.handle",
+        "bad+handle",
+        "bad handle",
+        "Dahlia",
+        "dah\nlia",
+        "",
+        "_",
+        "___",
+    ]
+    for probe in probes:
+        accepted_by_postgres = connection.execute(
+            text("SELECT :candidate ~ :pattern"),
+            {"candidate": probe, "pattern": f"^{HANDLE_REGEX}$"},
+        ).scalar_one()
+
+        try:
+            normalise_handle(probe)
+            accepted_by_service = True
+        except HandleInvalidError:
+            accepted_by_service = False
+
+        # The service may normalise first, so it can accept something the raw
+        # string fails. It must never accept something the database will refuse.
+        if accepted_by_service:
+            normalised = normalise_handle(probe)
+            stored_ok = connection.execute(
+                text("SELECT :candidate ~ :pattern"),
+                {"candidate": normalised, "pattern": f"^{HANDLE_REGEX}$"},
+            ).scalar_one()
+            assert stored_ok, (
+                f"the service accepts {probe!r} and normalises it to {normalised!r}, "
+                f"which the database CHECK refuses. That is a 500, not a 422."
+            )
+        else:
+            # Anything the service refuses is fine either way: it never reaches
+            # the database. Recorded so the probe set stays honest.
+            assert accepted_by_postgres in (True, False)

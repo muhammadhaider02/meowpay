@@ -158,6 +158,53 @@ def require_database() -> bool:
     return os.getenv("MEOWPAY_REQUIRE_DB", "").strip().lower() in ("1", "true", "yes")
 
 
+def supabase_url() -> str:
+    """The Supabase project, without a trailing slash.
+
+    Public: it ships in the browser bundle anyway. Required, because a verifier
+    that cannot name its issuer cannot verify anything, and guessing would mean
+    accepting tokens from an issuer we did not choose.
+    """
+    return require_env("SUPABASE_URL").rstrip("/")
+
+
+def jwks_url() -> str:
+    """Where the token signing keys live.
+
+    Returns no keys at all if the project is still on a shared HS256 secret,
+    which is the loud failure we want rather than a quiet fallback.
+    """
+    return optional_env("SUPABASE_JWKS_URL", f"{supabase_url()}/auth/v1/.well-known/jwks.json")
+
+
+def jwt_issuer() -> str:
+    return optional_env("SUPABASE_JWT_ISSUER", f"{supabase_url()}/auth/v1")
+
+
+def jwt_audience() -> str:
+    return optional_env("SUPABASE_JWT_AUDIENCE", "authenticated")
+
+
+def jwks_cache_seconds() -> int:
+    """How long a fetched key set is trusted. Matches Supabase's own edge cache."""
+    return int(optional_env("SUPABASE_JWKS_CACHE_SECONDS", "600"))
+
+
+def jwks_timeout_seconds() -> float:
+    """PyJWKClient defaults to 30, which is 30 seconds of a hung request."""
+    return float(optional_env("SUPABASE_JWKS_TIMEOUT_SECONDS", "3"))
+
+
+def supabase_secret_key() -> str:
+    """The service role key, for the GoTrue admin API.
+
+    Read by `meowpay-seed` and by nothing else. It bypasses every row level
+    security policy, so it must NOT be set on the API service: the API has no use
+    for it and its presence there is a standing privilege escalation risk.
+    """
+    return require_env("SUPABASE_SECRET_KEY")
+
+
 def cors_origins() -> list[str]:
     """Origins allowed to call the API from a browser.
 

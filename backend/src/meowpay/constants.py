@@ -13,6 +13,21 @@ from typing import Final
 TREASURY_CAT_ID: Final = uuid.UUID("00000000-0000-0000-0000-000000000000")
 TREASURY_HANDLE: Final = "meowpay_treasury"
 
+# The one definition of a handle. models.py builds its CHECK constraint from
+# this and the onboarding endpoint validates against it, so the Python mirror and
+# the SQL mirror cannot drift. Two copies would eventually disagree, and the
+# symptom is a user error arriving as a 500 from a constraint violation.
+#
+# Match it with re.fullmatch and never re.match with anchors: Python's `$` also
+# matches before a trailing newline and Postgres's does not, so "dahlia\n" would
+# pass the Python check and then be refused by the database.
+HANDLE_REGEX: Final = r"[a-z0-9_]{3,32}"
+
+# Refused at onboarding, and refused as `handle_invalid` rather than
+# `handle_taken` so nothing leaks about which rows exist. Without this, anyone
+# could register meowpay_support and phish from a name that looks official.
+RESERVED_HANDLE_PREFIX: Final = "meowpay_"
+
 # The one place the API version is written down. A directory per version is
 # how you pay for running two at once, and there is one.
 API_V1_PREFIX: Final = "/api/v1"

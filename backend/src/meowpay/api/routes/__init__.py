@@ -12,6 +12,8 @@ Health is deliberately not here. It is mounted unversioned at the root in
 
 from fastapi import APIRouter
 
+from meowpay.api.routes.cats import router as cats_router
 from meowpay.constants import API_V1_PREFIX
 
 api_router = APIRouter(prefix=API_V1_PREFIX)
+api_router.include_router(cats_router)

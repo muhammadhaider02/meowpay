@@ -75,27 +75,34 @@ meowpay/
     │       └── 0002_insert_the_treasury_cat.py
     │
     ├── src/meowpay/
+    │   ├── auth.py                   # token verification. no HTTP, no database
     │   ├── config.py
     │   ├── constants.py
     │   ├── db.py
     │   ├── errors.py
     │   ├── ledger.py                 # the only writer of balances and entries
     │   ├── models.py
+    │   ├── seed.py                   # `make seed`
     │   ├── session.py
     │   └── api/
     │       ├── app.py
     │       ├── deps.py
+    │       ├── errors.py             # the exception handlers
     │       ├── middleware.py
     │       ├── schemas.py
     │       └── routes/
     │           ├── __init__.py       # the /api/v1 router everything mounts on
+    │           ├── cats.py           # onboarding
     │           └── health.py
     │
     └── tests/
         ├── conftest.py
+        ├── test_auth_tokens.py       # no database, no network
+        ├── test_handles.py           # no database, no network
         ├── test_health.py
         ├── test_ledger.py
         ├── test_ledger_concurrency.py
+        ├── test_onboarding.py
         └── test_schema.py
 ```
 
@@ -105,10 +112,12 @@ meowpay/
 
 | Module | Responsibility |
 |---|---|
-| `config.py` | Env loading from `backend/.env`. `require_env()` raises at the point of use so a missing variable names itself in the traceback of whatever needed it; `optional_env()` treats empty as unset. `database_url()` does not return what it was given: it rewrites a bare `postgresql://` to `postgresql+psycopg` (SQLAlchemy would otherwise reach for psycopg2, which is not installed, and the `ModuleNotFoundError` reads as a broken install), defaults `sslmode` to `require` and refuses `disable`/`allow`/`prefer`, refuses port 6543, and refuses a bare `postgres` username against the pooler. `test_database_url()` derives from it by renaming the database, so there is one credential and not two that can drift. `db_schema()`, `require_database()`, `cors_origins()` (refuses `*`). |
+| `config.py` | Env loading from `backend/.env`. `require_env()` raises at the point of use so a missing variable names itself in the traceback of whatever needed it; `optional_env()` treats empty as unset. `database_url()` does not return what it was given: it rewrites a bare `postgresql://` to `postgresql+psycopg` (SQLAlchemy would otherwise reach for psycopg2, which is not installed, and the `ModuleNotFoundError` reads as a broken install), defaults `sslmode` to `require` and refuses `disable`/`allow`/`prefer`, refuses port 6543, and refuses a bare `postgres` username against the pooler. `test_database_url()` derives from it by renaming the database, so there is one credential and not two that can drift. `db_schema()`, `require_database()`, `cors_origins()` (refuses `*`), and the Supabase identity settings: `supabase_url()`, `jwks_url()`, `jwt_issuer()`, `jwt_audience()`, `supabase_secret_key()`. |
 | `ledger.py` | **The only writer of `cats.balance`, `transfers` and `entries`.** `transfer()` and `deposit()` share one `_settle()`, because a deposit is the same movement with the treasury as sender, which is what keeps every entry summing to zero. Returns a frozen `Settlement`, never an ORM object, so a read after the session closes cannot lazy-load. Takes a `sessionmaker` and never a `Session`: row locks are released by COMMIT, so a caller who committed mid-flight would drop them. `_apply_transaction_timeouts()` sets `lock_timeout` per transaction rather than per connection, see [decisions.md](decisions.md#session-settings-do-not-survive-the-pooler). |
+| `auth.py` | `TokenVerifier` turns a bearer token into `Claims`, or raises. Imports no FastAPI and takes its key source as a constructor argument, so its suite needs no network. ES256 via JWKS rather than a shared HS256 secret: with a shared secret this service would hold the key GoTrue **mints** with, so anyone who could read the deployment environment could forge a token for any cat. Accepted algorithms come from the verifier's construction and **never** from the token header. `CurrentCat` deliberately carries no balance. |
+| `seed.py` | `make seed`. Creates three auth users through the GoTrue admin API with `email_confirm`, links cats to them, then funds through `Ledger.deposit` and never by writing `balance`. Each step is independently idempotent, so a crash part way through is repaired by re-running. Reaches GoTrue over HTTP and never queries `auth.users`, which would hard-code the assumption that the application database is the auth database. |
 | `errors.py` | Every rejection as a typed class carrying a stable `code` and an HTTP `status`. Raised ahead of the database, so every CHECK stays a backstop that should never fire: one firing is a bug and a 500, not a user error. |
-| `constants.py` | `TREASURY_CAT_ID` (all-zeros sentinel), `TREASURY_HANDLE`, `MAX_AMOUNT` (1e12 per movement), `JS_SAFE_INTEGER` (2^53-1), `API_V1_PREFIX`. |
+| `constants.py` | `TREASURY_CAT_ID` (all-zeros sentinel), `TREASURY_HANDLE`, `MAX_AMOUNT` (1e12 per movement), `JS_SAFE_INTEGER` (2^53-1), `API_V1_PREFIX`, and `HANDLE_REGEX`, which `models.py` builds its CHECK from and onboarding validates against, so the two mirrors cannot drift. |
 | `db.py` | `Base` plus the constraint naming convention (`ck_`, `uq_`, `fk_`, `ix_`, `pk_`). The names are load bearing: `test_schema.py` matches them out of `IntegrityError` text. Imports nothing environmental, so importing a model never requires an environment. |
 | `models.py` | The three tables and every constraint. Deliberately **schema-unqualified**: `search_path` supplies `meowpay` instead, because schema-qualified models compared against the connection's default schema make autogenerate report every table missing, which is permanent `alembic check` drift. |
 | `session.py` | `build_engine()` (app) and `build_migration_engine()` (Alembic and schema setup). `isolation_level` pinned to `READ COMMITTED`: under `REPEATABLE READ` an idempotent replay re-reads on the transaction's original snapshot and cannot see the winning duplicate's committed row. `pool_size`/`max_overflow` are parameters so tests can make the cap hard, since a race test whose threads queue on the pool never races and still passes. A `connect` listener (`insert=True`) applies `search_path` and the session timeouts, with `autocommit` toggled on around the `SET`: without that the statement runs in a transaction and the pool's check-in `ROLLBACK` reverts it, so the handler would work once per connection and then silently stop. It then asserts `current_schema()` landed, because `public` is off the path and a missing schema would otherwise be a successful query against the wrong rows. |
@@ -118,9 +127,11 @@ meowpay/
 | Module | Responsibility |
 |---|---|
 | `app.py` | `create_app()` builds the FastAPI app and mounts middleware and routers. `serve()` is the `meowpay-api` console script: reads `API_HOST`/`API_PORT`, runs uvicorn by import string with `factory=True` so `--reload` has something to re-import. |
-| `deps.py` | `sessions()` and the `Sessions` annotated alias. Routes reach the session factory through `Depends` and never by import, which is what lets a test redirect them onto a throwaway database. |
+| `deps.py` | `sessions`, `ledger` and `verifier`, plus `claims` and `get_current_cat`. Routes reach all of them through `Depends` and never by import, which is what lets a test redirect them. `claims` and `get_current_cat` are deliberately separate: onboarding needs a verified caller and by definition has no cat row yet, so it can never depend on one. `HTTPBearer(auto_error=False)` because the default raises FastAPI's own 403 with a `{"detail": ...}` body the frontend cannot branch on. Both are plain `def` and never `async def`, because the key fetch is blocking and would otherwise stall the event loop. |
 | `middleware.py` | Effective chain `RequestID -> CORS -> UnhandledError -> route`. `RequestIDMiddleware` accepts an inbound `X-Request-ID` only if it parses as a UUID, else replaces it, and echoes it on the response. `UnhandledErrorMiddleware` renders the 500 envelope. It is middleware and not an exception handler because Starlette hoists a bare `Exception` handler to `ServerErrorMiddleware`, outside CORS, and the browser would then block every 500 so the frontend could not read the `code` it branches on. |
 | `schemas.py` | `HealthResponse`, `HealthStatus`, and `ErrorResponse`, the error envelope. |
+| `errors.py` | The exception handlers, and the one place the envelope is built. Registered for the `AppError` base, so Starlette's `__mro__` walk covers every subclass. Also rewrites FastAPI's own `RequestValidationError` and 404/405, which otherwise return `{"detail": ...}` and would give the frontend two error shapes to parse. |
+| `routes/cats.py` | `POST /api/v1/cats`, onboarding. Depends on a verified token and **not** on `get_current_cat`, because the caller has no cat row yet. Claim-then-read with `ON CONFLICT DO NOTHING`, which waits on a conflicting in-flight insert rather than skipping it, so two simultaneous sign-ups on one handle give one 201 and one 409. |
 | `routes/health.py` | `GET /health`. Reads the treasury row rather than `SELECT 1`, so a reachable but unmigrated database reports unhealthy. 200 when healthy, 503 otherwise. Version from package metadata, falling back to `unknown`. |
 
 ### The error envelope
@@ -235,6 +246,22 @@ Read from `backend/.env`. See `backend/.env.example`.
 | `conftest.py` | Throwaway `meowpay_test` database created, migrated with Alembic and dropped per session. Per-test isolation is an outer transaction that is never committed, with `join_transaction_mode="create_savepoint"` so code under test can really call `commit()` while the outer transaction still owns the rollback. `_test_db_name()` refuses any database not ending `_test`, because the drops use `WITH (FORCE)` and would succeed in destroying the application's data |
 | `test_health.py` | `/health` healthy, unreachable and reachable-but-unmigrated. Plus the 500 envelope carrying CORS headers and leaking nothing, and a forged request id being replaced |
 | `test_schema.py` | Every constraint above, driven by raw SQL so the database refuses them even when the application is wrong |
+| `test_auth_tokens.py` | The verifier, with a locally generated ES256 key pair. **No database and no network**, so these run anywhere. Algorithm confusion, `alg: none`, wrong issuer, wrong audience, expiry, a non-uuid subject, anonymous users, unknown `kid`, clock skew, and the ours-versus-theirs split between an unreachable key set (503) and a kid that is genuinely absent (401) |
+| `test_handles.py` | `normalise_handle` and `normalise_display_name`, called directly. No database, no network. These exist because `OnboardRequest` strips and bounds its input before the route runs, so several guards are **unreachable** from an endpoint test and were deletable with every endpoint test still green |
+| `test_onboarding.py` | `POST /api/v1/cats` over HTTP with only the cryptography stubbed, so the cat lookup, the 403, the handle collisions and the envelope all run for real |
+
+### The guard that `alembic check` does not provide
+
+Autogenerate never reflects or compares `CHECK` constraints, so building
+`HANDLE_PATTERN` from `HANDLE_REGEX` proves nothing on its own: the live
+constraint is a literal in migration `0001`.
+
+`test_the_handle_check_in_the_database_matches_the_one_the_service_enforces` is
+what compares them. It asks the live constraint and the Python validator about
+the same strings and requires them to agree. Without it, widening
+`HANDLE_REGEX` by one character leaves `alembic check` clean and the suite green
+while the endpoint returns 500 on a handle the service accepts and the database
+refuses.
 | `test_ledger.py` | Settlement, idempotent replay, every typed rejection, and reconciliation. Two tests assert on the **emitted SQL** rather than behaviour, because `ORDER BY` and `FOR NO KEY UPDATE` are plan-shape properties whose absence shows up as a deadlock under load and never in a functional test |
 | `test_ledger_concurrency.py` | Eight threads on real connections with real commits: one key settles exactly once, eight transfers cannot overdraw, opposing transfers do not deadlock, and the ledger still reconciles afterwards. Plus the `lock_timeout` to `55P03` to 503 chain |
 

@@ -6,6 +6,7 @@ import logging
 
 from fastapi import FastAPI
 
+from meowpay.api.errors import add_exception_handlers
 from meowpay.api.middleware import add_middleware
 from meowpay.api.routes import api_router
 from meowpay.api.routes.health import router as health_router
@@ -21,6 +22,9 @@ def create_app() -> FastAPI:
     )
 
     add_middleware(app)
+    # After the middleware, and registered for specific classes so the
+    # responses travel back out through CORS. See api/errors.py.
+    add_exception_handlers(app)
 
     # Health sits at the root, unversioned, because a liveness probe should not
     # move when the API version does.
