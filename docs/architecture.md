@@ -61,6 +61,33 @@ meowpay/
 │   ├── architecture.md              # this file
 │   └── decisions.md                 # what was chosen, what was skipped, why
 │
+├── frontend/                        # next.js app router. the only thing a cat sees
+│   ├── .env.example                 # three NEXT_PUBLIC_ values, all public by design
+│   ├── next.config.ts
+│   ├── package.json
+│   ├── tsconfig.json
+│   ├── vitest.config.mts
+│   └── src/
+│       ├── app/
+│       │   ├── globals.css
+│       │   ├── layout.tsx
+│       │   ├── page.tsx             # balance, send, top up, statement
+│       │   ├── onboarding/page.tsx  # reached on 403 cat_not_onboarded
+│       │   └── sign-in/page.tsx     # by email, never by handle
+│       ├── components/
+│       │   ├── DepositForm.tsx
+│       │   ├── Receipt.tsx
+│       │   ├── SendForm.tsx
+│       │   └── Statement.tsx
+│       └── lib/
+│           ├── api.test.ts          # the money-path rules
+│           ├── api.ts               # token forwarding, envelope, retry once
+│           ├── idempotency.test.ts
+│           ├── idempotency.ts       # keys that outlive the form that used them
+│           ├── session.ts           # the two auth gates
+│           ├── supabase.ts          # gotrue only. never reaches the database
+│           └── types.ts             # mirrors api/schemas.py
+│
 └── backend/
     ├── .env.example                 # canonical variable list. .env is gitignored
     ├── .python-version
@@ -150,6 +177,19 @@ Every 500 renders this shape. The frontend branches on `code`, never on the HTTP
 | `error.request_id` | The UUID also returned in the `X-Request-ID` header, so a user-reported failure maps to one log line |
 
 ---
+
+## Modules (`frontend/src/`)
+
+| Module | Responsibility |
+|---|---|
+| `lib/supabase.ts` | The browser auth client, and the only thing that talks to Supabase directly. It talks to GoTrue and nothing else: the tables live in a private `meowpay` schema PostgREST does not expose, so `supabase.from("cats")` fails even with a valid session. Every balance and every movement comes from FastAPI. A missing `NEXT_PUBLIC_` value throws at module load rather than surfacing as a dead sign-in button, because these are compiled into the bundle at build time |
+| `lib/api.ts` | The one place that calls the API. Reads the token with `getSession()` immediately before each request rather than holding it in state, because supabase-js refreshes in the background and a captured token produces intermittent 401s. Parses the error envelope into an `ApiError` carrying `code`, which is what callers branch on. Treats **200 and 201 alike**: 201 settled something, 200 replayed one, and a client that branches on 201 breaks on every retry. Retries **once**, and only on `token_expired`, which is safe only because the idempotency key is stable across the retry. `ledger_busy` is deliberately not retried behind the user's back |
+| `lib/session.ts` | The two auth gates, which are different questions. `getClaims()` answers "is anyone signed in" by verifying the JWT locally; `getSession()` is not used for it, because it reads local storage without revalidating. Whether that identity has a cat is a question only the API can answer, and `403 cat_not_onboarded` is the answer that routes to onboarding. `auth_unavailable` deliberately does not sign anyone out: bouncing every signed-in user to the login screen during a Supabase blip makes the blip worse. A refresh that fails **after** a movement settled is non-fatal and leaves the page standing, because replacing it with an error screen would report a successful send as a failure. Every load carries a generation and only the newest may commit, since two really do overlap |
+| `lib/idempotency.ts` | Where an idempotency key lives, and deliberately not a React ref. A key tied to a mounted component is minted again by anything that unmounts one, and switching between the send and top-up tabs does exactly that: an attempt whose response was lost, a tab switch, then a resubmit reaches the backend under a key it has never seen and settles a second time. So the key sits in `sessionStorage`, one slot per kind of movement, surviving unmount and reload. It rotates on a settlement and on `idempotency_key_reused`, and on nothing else, because a rejected transfer does not consume its key |
+| `components/SendForm.tsx`, `components/DepositForm.tsx` | The money path. Both take their key from `lib/idempotency` rather than owning one, rotate it after a settlement, and rotate it on `idempotency_key_reused` so the backend's own remedy is reachable from the UI instead of wedging the form. Both also guard on a ref rather than relying on the disabled attribute having been flushed |
+| `components/Receipt.tsx` | Labels `balance_after` as "balance at the time" rather than "your balance", since on a replay it is the value from the original ledger line and may be weeks old |
+| `components/Statement.tsx` | Keyset pagination. `next_before` comes from the API and is passed straight back, never constructed here |
+| `app/page.tsx` | Ties them together. When a movement settles it refetches `GET /api/v1/me` rather than painting `movement.balance_after`, so a replay cannot make the balance appear to go backwards |
 
 ## The tables
 
@@ -246,6 +286,10 @@ Read from `backend/.env`. See `backend/.env.example`.
 
 ## Tests
 
+Two suites. `cd backend && uv run pytest` is 187 tests and owns every guarantee
+about money. `cd frontend && npm test` is 42 and owns the parts of the browser
+that could cause a double spend: the request client and the key store.
+
 | File | Covers |
 |---|---|
 | `conftest.py` | Throwaway `meowpay_test` database created, migrated with Alembic and dropped per session. Per-test isolation is an outer transaction that is never committed, with `join_transaction_mode="create_savepoint"` so code under test can really call `commit()` while the outer transaction still owns the rollback. `_test_db_name()` refuses any database not ending `_test`, because the drops use `WITH (FORCE)` and would succeed in destroying the application's data |
@@ -255,6 +299,8 @@ Read from `backend/.env`. See `backend/.env.example`.
 | `test_handles.py` | `normalise_handle` and `normalise_display_name`, called directly. No database, no network. These exist because `OnboardRequest` strips and bounds its input before the route runs, so several guards are **unreachable** from an endpoint test and were deletable with every endpoint test still green |
 | `test_movements_api.py` | Transfers and deposits over HTTP, with the ledger and the database real. The sender coming from the token and not the body, replay as a 200, a ledger refusal arriving in the envelope with CORS headers, and the 403 that `CurrentCatDep` could not fire until these routes existed |
 | `test_history_api.py` | Balance, statement and directory. Double entry seen from both sides, the keyset walk paging to the end without repeating a row, and the directory excluding the caller and the treasury |
+| `frontend/src/lib/api.test.ts` | The request client, in Node with no browser. What actually goes on the wire, since a route or a body that is never asserted is a route that can be pointed anywhere; a retry reusing its idempotency key **and** carrying a freshly read token, which are jointly the only reason retrying is safe; 201 and 200 both being success, so a replay is not reported as a failure; the retry firing once and only for `token_expired`, never for a `ledger_busy` that may already have moved treats; the abort budget covering the body read and not just the headers |
+| `frontend/src/lib/idempotency.test.ts` | That a key outlives the component that used it, survives a reload, stays steady when `sessionStorage` is denied, and changes only when the intent is over. These are the assertions that would have caught the tab-switch double spend |
 | `test_onboarding.py` | `POST /api/v1/cats` over HTTP with only the cryptography stubbed, so the cat lookup, the 403, the handle collisions and the envelope all run for real |
 | `test_ledger.py` | Settlement, idempotent replay, every typed rejection, and reconciliation. Two tests assert on the **emitted SQL** rather than behaviour, because `ORDER BY` and `FOR NO KEY UPDATE` are plan-shape properties whose absence shows up as a deadlock under load and never in a functional test |
 | `test_ledger_concurrency.py` | Eight threads on real connections with real commits: one key settles exactly once, eight transfers cannot overdraw, opposing transfers do not deadlock, and the ledger still reconciles afterwards. Plus the `lock_timeout` to `55P03` to 503 chain |

@@ -6,7 +6,9 @@
 
 [![Python](https://img.shields.io/badge/Python-3.13-3776AB?logo=python&logoColor=white)](https://python.org)
 [![uv](https://img.shields.io/badge/uv-Package_Manager-DE5FE9?logo=uv&logoColor=white)](https://docs.astral.sh/uv/)
-[![FastAPI](https://img.shields.io/badge/API-FastAPI-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.141-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
+[![Next.js](https://img.shields.io/badge/Next.js-15-000000?logo=nextdotjs&logoColor=white)](https://nextjs.org)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.9-3178C6?logo=typescript&logoColor=white)](https://typescriptlang.org)
 [![Supabase](https://img.shields.io/badge/Database-Supabase-3FCF8E?logo=supabase&logoColor=white)](https://supabase.com)
 
 A digital wallet for cats. Humans top it up, cats send each other treats.
@@ -20,7 +22,8 @@ A digital wallet for cats. Humans top it up, cats send each other treats.
 One vertical slice of a money-movement product: a cat signs in, sees a balance
 and sends treats to another cat. A FastAPI service over Postgres with an
 append-only double-entry ledger, row-level locking and idempotent writes, so a
-transfer settles exactly once or not at all.
+transfer settles exactly once or not at all, and a Next.js front end that is the
+only thing a cat actually sees.
 
 ## Quickstart
 
@@ -58,6 +61,22 @@ ledger rather than by writing balances, so a freshly seeded database reconciles.
 `curl localhost:8000/health` reports whether the API can actually reach the
 database and whether that database has been migrated. Interactive docs at
 <http://localhost:8000/docs>.
+
+**4. Run the web app**, in a second terminal.
+
+```bash
+cp frontend/.env.example frontend/.env.local
+cd frontend && npm install && npm run dev
+```
+
+Fill in the Supabase URL and the **publishable** key (it begins `sb_publishable_`,
+not `sb_secret_`) from the same dashboard page, and leave `NEXT_PUBLIC_API_BASE_URL`
+pointing at the local API. Then open <http://localhost:3000> and sign in with one
+of the emails `make seed` printed.
+
+All three values are compiled into the browser bundle and are meant to be public.
+The secret key is not among them and never should be: it belongs to `make seed`,
+which runs from your machine.
 
 ### The endpoints
 
@@ -106,6 +125,10 @@ dependency:
 
 There is no `clean`. To roll the schema back:
 `cd backend && uv run alembic downgrade base`.
+
+The front end is not wrapped in `make`. It is npm and there is nothing to
+simplify: `npm run dev`, `npm run build`, `npm run typecheck` and `npm test`,
+from `frontend/`.
 
 ## Development
 
