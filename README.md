@@ -34,6 +34,35 @@ Supabase project, which owns the database and the identities and nothing else.
 row level security and no policies, so a browser cannot reach them at all.
 [Why](docs/decisions.md#where-the-tables-live).
 
+## Try it
+
+| | |
+|---|---|
+| Web app | **https://meowpay-wallet.vercel.app** |
+| Health | https://meowpay.onrender.com/health |
+| Interactive docs | https://meowpay.onrender.com/docs |
+
+Three demo cats. The password for all of them is **`treats123`**.
+
+| Email | Funded with |
+|---|---|
+| `dahlia@meowpay.test` | 1500 treats |
+| `milo@meowpay.test` | 300 treats |
+| `lotus@meowpay.test` | nothing, on purpose |
+
+Open dahlia in one browser and milo in another and send treats between them: both
+balances and both statements move, with opposite signs. Send more than a cat has
+to see a refusal rather than an overdraft; lotus is the quickest way to that.
+
+Those are seed amounts, not current balances. This is a live wallet and
+`make seed` will not restore one: its deposits carry a fixed idempotency key, so
+a re-run replays and settles nothing.
+
+**Top up** is how treats enter a wallet. They come from the treasury, whose
+balance goes correspondingly negative, which is what keeps every movement summing
+to zero. The treasury has no login and structurally cannot be given one:
+[why](docs/architecture.md#constraints).
+
 ## Quickstart
 
 Requires [uv](https://docs.astral.sh/uv/), Node 20+ and a free
@@ -75,9 +104,8 @@ Environment variables only. **`backend/.env.example` and `frontend/.env.example`
 are the canonical lists**, with a note against each explaining what it is for and
 what goes wrong without it. Copy them and fill them in.
 
-`DATABASE_URL` and `SUPABASE_URL` are resolved at startup. `SUPABASE_SECRET_KEY`
-is read by `make seed` and by nothing else, so it belongs on a developer machine
-and never on a deployed service.
+`SUPABASE_SECRET_KEY` belongs on a developer machine and never on a deployed
+service.
 
 ## Development
 
@@ -117,3 +145,36 @@ service reads one when it is created by hand.
 
 The runbook, including the three prerequisites no health check can catch, is in
 [deployment.md](docs/deployment.md).
+
+## Trade-offs
+
+Every decision and what it cost is in
+[decisions.md](docs/decisions.md#trade-offs-accepted). The four that change how
+you read the code: a signed-out token stays valid until it expires; the ledger
+summing to zero is a single-writer module and a test rather than a database
+constraint; there is no rate limiting; the front end tests the request client and
+the key store and not the components.
+
+Two items in the brief are answered by other means, and both are in
+[decisions.md](docs/decisions.md#skipped): a per-request payload checksum, and a
+verification header beyond `X-Request-ID`.
+
+## How this was built
+
+Claude Code, planned before written and replanned whenever the code disagreed
+with the plan. Two practices did the work worth reporting.
+
+**Review agents got the diff without the author's framing.** An agent told what
+the code is meant to do tends to confirm that it does. The plan for the browser
+client specified holding the idempotency key in a React ref; a review run that
+way is what established the key has to outlive the component, and
+`lib/idempotency.ts` is the result.
+
+**Mutation testing, with the mutations chosen by someone other than whoever wrote
+the tests.** Ten author-chosen mutations against the request client all failed
+correctly, which read as a sound suite. An independent reader then broke the same
+suite nine ways it did not catch. Author-chosen mutations prove only that the
+author tested what the author had already thought of.
+
+Each commit is a working increment and carries its reasoning in the message
+rather than in a comment.

@@ -25,11 +25,17 @@ down_revision: str | None = "0001"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
-# Kept in sync with meowpay.constants.TREASURY_CAT_ID. Migrations are pinned to
-# a point in history and must not import moving application constants, so this
-# is written out rather than imported. It is a fixed literal, never user input,
-# so interpolating it into the statement carries no injection surface.
+# Kept in sync with meowpay.constants.TREASURY_CAT_ID and TREASURY_HANDLE.
+# Migrations are pinned to a point in history and must not import moving
+# application constants, so both are written out rather than imported. They are
+# fixed literals, never user input, so interpolating them into the statement
+# carries no injection surface.
+#
+# The handle is load bearing beyond this file: RESERVED_HANDLE_PREFIX is
+# "meowpay_", and that prefix is what stops an ordinary cat claiming this name.
+# If the two ever drifted apart, the guard would stop covering the treasury.
 TREASURY_ID = "00000000-0000-0000-0000-000000000000"
+TREASURY_HANDLE = "meowpay_treasury"
 
 
 def upgrade() -> None:
@@ -42,7 +48,7 @@ def upgrade() -> None:
         sa.text(
             f"""
             INSERT INTO cats (id, handle, display_name, auth_user_id, balance, is_system)
-            VALUES ('{TREASURY_ID}'::uuid, 'meowpay_treasury', 'MeowPay Treasury',
+            VALUES ('{TREASURY_ID}'::uuid, '{TREASURY_HANDLE}', 'MeowPay Treasury',
                     NULL, 0, TRUE)
             ON CONFLICT (id) DO NOTHING
             """

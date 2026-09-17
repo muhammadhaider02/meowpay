@@ -153,7 +153,7 @@ meowpay/
 | `auth.py` | `TokenVerifier` turns a bearer token into `Claims`, or raises. Imports no FastAPI and takes its key source as a constructor argument, so its suite needs no network. ES256 via JWKS rather than a shared HS256 secret: with a shared secret this service would hold the key GoTrue **mints** with, so anyone who could read the deployment environment could forge a token for any cat. Accepted algorithms come from the verifier's construction and **never** from the token header. `CurrentCat` deliberately carries no balance. |
 | `seed.py` | `make seed`. Creates three auth users through the GoTrue admin API with `email_confirm`, links cats to them, then funds through `Ledger.deposit` and never by writing `balance`. Each step is independently idempotent, so a crash part way through is repaired by re-running. Reaches GoTrue over HTTP and never queries `auth.users`, which would hard-code the assumption that the application database is the auth database. |
 | `errors.py` | Every rejection as a typed class carrying a stable `code` and an HTTP `status`. Raised ahead of the database, so every CHECK stays a backstop that should never fire: one firing is a bug and a 500, not a user error. |
-| `constants.py` | `TREASURY_CAT_ID` (all-zeros sentinel), `TREASURY_HANDLE`, `MAX_AMOUNT` (1e12 per movement), `JS_SAFE_INTEGER` (2^53-1), `API_V1_PREFIX`, and `HANDLE_REGEX`, which `models.py` builds its CHECK from and onboarding validates against, so the two mirrors cannot drift. |
+| `constants.py` | `TREASURY_CAT_ID` (all-zeros sentinel), `TREASURY_HANDLE`, `MAX_AMOUNT` (1e12 per movement), `JS_SAFE_INTEGER` (2^53-1), `API_V1_PREFIX`, `RESERVED_HANDLE_PREFIX`, which `normalise_handle` refuses on both the onboarding path and the transfer recipient path so no cat can claim a name that looks official, and `HANDLE_REGEX`, which `models.py` builds its CHECK from and onboarding validates against, so the two mirrors cannot drift. |
 | `db.py` | `Base` plus the constraint naming convention (`ck_`, `uq_`, `fk_`, `ix_`, `pk_`). The names are load bearing: `test_schema.py` matches them out of `IntegrityError` text. Imports nothing environmental, so importing a model never requires an environment. |
 | `models.py` | The three tables and every constraint. Deliberately **schema-unqualified**: `search_path` supplies `meowpay` instead, because schema-qualified models compared against the connection's default schema make autogenerate report every table missing, which is permanent `alembic check` drift. |
 | `session.py` | `build_engine()` (app) and `build_migration_engine()` (Alembic and schema setup). `isolation_level` pinned to `READ COMMITTED`: under `REPEATABLE READ` an idempotent replay re-reads on the transaction's original snapshot and cannot see the winning duplicate's committed row. `pool_size`/`max_overflow` are parameters so tests can make the cap hard, since a race test whose threads queue on the pool never races and still passes. A `connect` listener (`insert=True`) applies `search_path` and the session timeouts, with `autocommit` toggled on around the `SET`: without that the statement runs in a transaction and the pool's check-in `ROLLBACK` reverts it, so the handler would work once per connection and then silently stop. It then asserts `current_schema()` landed, because `public` is off the path and a missing schema would otherwise be a successful query against the wrong rows. |
@@ -253,10 +253,16 @@ These hold even when the service is wrong.
 | `ck_cats_only_system_lacks_auth_user` | The treasury carrying an identity, and an ordinary cat losing one. Makes an unlinked ordinary cat impossible, so there is never an `UPDATE cats SET auth_user_id` path |
 | `uq_cats_auth_user_id` | Two cats sharing one login, and so either spending the other's treats |
 | `ck_cats_balance_is_js_safe` | A balance a browser cannot represent exactly. The per-movement cap alone does not bound this: enough deposits still walk past 2^53-1, and the treasury gets there first |
+| `ck_cats_handle_shape`, `ck_cats_handle_is_lowercase` | A handle the service would never have minted, arriving by any path that is not onboarding. `HANDLE_REGEX` is the same pattern, and a test compares the two so they cannot drift |
+| `uq_cats_handle` | Two cats answering to one name, which is how a transfer reaches the wrong recipient |
 | `uq_transfers_owner_cat_id_idempotency_key` | A duplicate settlement. Also the index the replay lookup reads |
-| `uq_entries_transfer_id_cat_id` | One cat credited twice for one movement. Does **not** make the ledger balance: a line for a cat that is not party to the movement is still accepted |
 | `ck_transfers_parties_differ` | A self-transfer existing at all |
 | `ck_transfers_amount_positive`, `ck_transfers_amount_within_cap` | Non-positive and unrepresentable amounts |
+| `ck_transfers_idempotency_key_shape` | A key too short to be unique or too long to index. 8 to 255, mirrored by `check_idempotency_key` |
+| `uq_entries_transfer_id_cat_id` | One cat credited twice for one movement. Does **not** make the ledger balance: a line for a cat that is not party to the movement is still accepted |
+| `ck_entries_amount_non_zero` | A line that moves nothing. It would balance, and mean nothing |
+| `ck_entries_parties_differ` | A cat as its own counterparty |
+| `ck_transfers_kind`, `ck_entries_kind` | A movement kind outside `transfer` and `deposit`. `native_enum=False` renders these as CHECKs rather than a Postgres enum, so widening the set is an ordinary migration |
 
 **Not enforced here:** the ledger summing to zero, and deposits originating at
 the treasury. Nothing stops a hand-written `INSERT` adding a lone unbalanced
@@ -268,13 +274,17 @@ reconciliation test rather than by the schema.
 ## Configuration (environment variables)
 
 Read from `backend/.env`. **`backend/.env.example` is the canonical list**, with
-a note against each variable; the two below are the ones without a usable
-default, and `frontend/.env.example` covers the browser bundle separately.
+a note against each variable; the two below are the ones resolved at boot **and**
+without a default, and `frontend/.env.example` covers the browser bundle
+separately. `SUPABASE_SECRET_KEY` also has no default, but it belongs to
+`make seed` rather than to the running service.
 
 **Required**
 
-Both are resolved by the lifespan at startup, so the application refuses to boot
-without them rather than failing one request at a time.
+The lifespan resolves these two at startup, so the application refuses to boot
+without them rather than failing one request at a time. It resolves
+`CORS_ORIGINS` at the same point, which is why a malformed one is also fatal
+even though it has a usable default.
 
 | Variable | Purpose |
 |---|---|
@@ -287,7 +297,7 @@ without them rather than failing one request at a time.
 |---|---|---|
 | `DB_SCHEMA` | `meowpay` | Where the application's tables live |
 | `TEST_DATABASE_URL` | `DATABASE_URL` renamed to `meowpay_test` | The throwaway database the suite creates and drops |
-| `MEOWPAY_REQUIRE_DB` | unset | Set to `1` in CI so an unreachable database is an error rather than a skip |
+| `MEOWPAY_REQUIRE_DB` | unset | Set to `1` wherever the suite runs unattended, so an unreachable database is an error rather than a skip |
 | `CORS_ORIGINS` | `http://localhost:3000,http://127.0.0.1:3000` | Browser origins allowed to call the API. `*` is refused |
 | `API_HOST` / `API_PORT` | `127.0.0.1` / `8000` | Read only by `serve()` |
 
@@ -334,7 +344,7 @@ Two more pairs are guarded the same way, and both are reachable by a caller:
 | Python | SQL constraint |
 |---|---|
 | `normalise_handle` / `HANDLE_REGEX` | `ck_cats_handle_shape` |
-| `_check_idempotency_key`, 8 to 255 | `ck_transfers_idempotency_key_shape` |
+| `check_idempotency_key`, 8 to 255 | `ck_transfers_idempotency_key_shape` |
 | `_check_amount` / `MAX_AMOUNT` | `ck_transfers_amount_positive`, `ck_transfers_amount_within_cap` |
 
 Each test reads `pg_get_constraintdef` and then asks both sides about the same

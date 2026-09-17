@@ -185,9 +185,9 @@ def require_database() -> bool:
     """Whether an unreachable database is an error rather than a skip.
 
     Off by default, because a developer without the variables set should get a
-    clear skip. On in CI, where a skipped suite is indistinguishable from a
-    passing one and a paused free-tier Supabase project would produce exactly
-    that.
+    clear skip. On wherever the suite runs unattended, where a skipped suite is
+    indistinguishable from a passing one and a paused free-tier Supabase project
+    would produce exactly that.
     """
     return os.getenv("MEOWPAY_REQUIRE_DB", "").strip().lower() in ("1", "true", "yes")
 

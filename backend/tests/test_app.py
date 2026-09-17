@@ -5,7 +5,7 @@ Entering a `TestClient` context runs the lifespan, and the lifespan resolves
 `DATABASE_URL` and `SUPABASE_URL`, so both are supplied here as well formed
 fakes. Nothing dials them: the lifespan validates the URL string and never
 opens a connection, which is the property that lets these run on a machine with
-no database and in CI with no secrets.
+no database and anywhere no secrets are available.
 
 The fake connection string is deliberately shaped like a real Supabase pooler
 URL. A value that would be refused by `config._normalise` would make these tests
@@ -38,7 +38,7 @@ def _configuration(monkeypatch: pytest.MonkeyPatch) -> None:
     """Set unconditionally, so these tests behave the same everywhere.
 
     Reading the developer's real `.env` when one happens to exist would make the
-    suite pass locally for a reason CI does not have.
+    suite pass locally for a reason a clean checkout does not have.
     """
     monkeypatch.setenv("DATABASE_URL", FAKE_DATABASE_URL)
     monkeypatch.setenv("SUPABASE_URL", FAKE_SUPABASE_URL)

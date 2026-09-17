@@ -4,7 +4,7 @@ The API runs on Render and the web app on Vercel, both wired to this repo
 through their dashboards.
 
 There is deliberately no `render.yaml` and no `vercel.json`. Neither platform
-reads one when the service is created by hand, and committed configuration that
+reads one when the service is created by hand and committed configuration that
 nothing reads is a second source of truth that goes stale silently. The settings
 live here instead.
 
@@ -154,10 +154,4 @@ broken push replacing a working deploy.
 The suite creates and drops a `meowpay_test` database on the **same** Supabase
 project, and the concurrency fixtures build their own engine on top of the
 ordinary one, so its peak is the sum of the two rather than either alone. The
-live API holds connections at the same time. This is also why CI runs only the
-tests that need no database.
-
-**Both free tiers sleep.** Render spins down after 15 minutes idle with a cold
-start around 50 seconds, which the front end shows as a waking state rather than
-a spinner. Supabase pauses a free project after 7 days of inactivity, which the
-bring-your-own-project path in the [README](../README.md) exists to survive.
+live API holds connections at the same time.
