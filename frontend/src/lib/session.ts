@@ -111,9 +111,11 @@ export function useSession(): Session {
 
   useEffect(() => {
     void load(false);
-    // Deliberately once per mount. `load` changes identity whenever `me` does,
-    // and depending on it here would refetch the cat every time the cat landed.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // Deliberately once per mount, and deliberately not exhaustive. `load`
+    // changes identity whenever `me` does, so depending on it here would
+    // refetch the cat every time the cat landed. There is no eslint in this
+    // project, so there is no disable comment either: a directive naming a rule
+    // nothing runs is a note that looks like configuration.
   }, []);
 
   const refresh = useCallback(() => load(true), [load]);

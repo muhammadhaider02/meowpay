@@ -1,7 +1,6 @@
 # Decisions
 
-What was chosen, what was skipped and why. Grown alongside the code, so it
-covers what exists. The map of what exists is in
+What was chosen, what was skipped and why. The map of what exists is in
 [architecture.md](architecture.md).
 
 ---
@@ -58,6 +57,9 @@ covers what exists. The map of what exists is in
 | **Retry once, and only on `token_expired`** | Safe only because the key is stable across the retry: if the first attempt settled, the second replays it. `ledger_busy` is retryable too but is left to a button, because retrying it silently means retrying something that may already have moved treats |
 | **The browser reads no balance from a movement response** | `balance_after` is the balance when the movement settled, and on a replay that is historical. The page refetches `GET /api/v1/me`, so a repeated request cannot make the balance appear to go backwards |
 | **No Next.js rewrite proxying `/api` to the backend** | A same-origin rewrite would make CORS untested in development and hide a misconfigured `CORS_ORIGINS` until someone opened the deployed app. The browser talks to FastAPI directly, so the origin list is exercised on every request |
+| **The build refuses to run without the three `NEXT_PUBLIC_` values** | They are compiled into the bundle, so a build missing one produces an app that is permanently wrong and silent about it: `NEXT_PUBLIC_API_BASE_URL` would fall back to localhost, and the browser blocks that as mixed content on an https page before it is even sent. The check lives in `next.config.ts` rather than at module scope in `lib/api.ts` because a throw there is only reached while the pages are prerendered, so a later `force-dynamic` would silence it, and because the tests import that module at top level |
+| **The boot-time check validates the connection string and never dials it** | A URL naming the transaction pooler is never going to work and should kill the boot. A database that is unreachable is transient and should leave the service up so `/health` reports it honestly. Connecting at startup would collapse the second into the first and turn a blip into a failed deploy |
+| **Render's health check points at `/health`, which touches the database** | A build that cannot read the database never replaces one that can, and a dependency-free probe would wave exactly that through. The trade, and what it costs, is in [deployment.md](deployment.md#why-the-health-check-path-is-health) |
 
 ## Where the tables live
 
@@ -130,8 +132,7 @@ defensible production ceiling.
 
 ## Skipped
 
-Deliberately not built. The exercise is scored against extra surface area, so
-each is a decision rather than an oversight. This list grows with the slice.
+Deliberately not built. Each is a decision rather than an oversight.
 
 | Not built | Why |
 |---|---|
@@ -148,9 +149,9 @@ each is a decision rather than an oversight. This list grows with the slice.
 
 | Trade-off | Consequence |
 |---|---|
-| **The front end tests the request client and the key store, not the components** | 42 tests cover `lib/api.ts` and `lib/idempotency.ts`, which between them are the only parts of the browser that can cause a double spend. The forms and the rendering carry none, so a broken layout is caught by opening the page rather than by a suite. That is the cheap failure to find; the expensive one is covered. An independent review of the first version of these tests found nine mutations that survived them, which is the argument for the review and not against the tests |
+| **The front end tests the request client and the key store, not the components** | 42 tests cover `lib/api.ts` and `lib/idempotency.ts`, which between them are the only parts of the browser that can cause a double spend. The forms and the rendering carry none, so a broken layout is caught by opening the page rather than by a suite. That is the cheap failure to find; the expensive one is covered. |
 | **The frontend's types are a hand-written mirror of `schemas.py`** | Nothing fails to compile if a field is renamed on the Python side; it arrives `undefined` at runtime instead. Accepted because the surface is seven endpoints and one consumer, and `docs/api.md` is the shared contract. A generated client is the fix if the surface grows |
-| **A signed-out token stays valid until it expires** | Nothing is introspected per request, so signing out revokes the refresh token and not the outstanding access token. Mitigated by a 900 second token lifetime rather than the 3600 default. `session_id` is in the claims, so a denylist is the available seam if it ever needs to be tighter. This is the one real security regression from minting our own tokens, and it buys not having the auth server in the path of every transfer |
+| **A signed-out token stays valid until it expires** | Nothing is introspected per request, so signing out revokes the refresh token and not the outstanding access token. Mitigated by a 900 second token lifetime rather than the 3600 default. `session_id` is in the claims, so a denylist is the available seam if it ever needs to be tighter. This is the one security cost of verifying tokens rather than introspecting them, and it buys not having the auth server in the path of every transfer |
 | **Nothing in the test suite touches the real auth server** | The verifier is tested against a locally generated key pair, which is what makes those tests fast, offline and exhaustive. The cost is that no test proves Supabase's real tokens carry the claims we require. Verified by hand instead: sign in, verify, resolve to a cat |
 | **The treasury is a global write hotspot** | Every deposit locks one row, so deposits serialize. Correct at this scale. At real scale you shard it per region |
 | **A failed transfer does not consume its idempotency key** | The opposite of Stripe, and deliberate. A rejection is not a settlement, so retrying after fixing the cause should succeed rather than replay a failure. A caller who wants the Stripe behaviour can use a fresh key |

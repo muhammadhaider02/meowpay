@@ -13,158 +13,107 @@
 
 A digital wallet for cats. Humans top it up, cats send each other treats.
 
-[API](docs/api.md) · [Architecture](docs/architecture.md) · [Decisions](docs/decisions.md)
+[API](docs/api.md) · [Architecture](docs/architecture.md) · [Decisions](docs/decisions.md) · [Deployment](docs/deployment.md)
 
 </div>
 
 ---
 
-One vertical slice of a money-movement product: a cat signs in, sees a balance
-and sends treats to another cat. A FastAPI service over Postgres with an
-append-only double-entry ledger, row-level locking and idempotent writes, so a
-transfer settles exactly once or not at all, and a Next.js front end that is the
-only thing a cat actually sees.
+## The slice
+
+One vertical slice of a money-movement product, end to end: a cat signs in, sees
+a balance, sends treats to another cat and reads a statement.
+
+A FastAPI service over Postgres with an append-only double-entry ledger, row
+level locking and idempotent writes, so a transfer settles exactly once or not
+at all. A Next.js front end is the only part a cat sees. Both talk to a hosted
+Supabase project, which owns the database and the identities and nothing else.
+
+`meowpay.ledger` is the only writer of `cats.balance`, `transfers` and
+`entries`. The tables live in a private schema PostgREST does not expose, with
+row level security and no policies, so a browser cannot reach them at all.
+[Why](docs/decisions.md#where-the-tables-live).
 
 ## Quickstart
 
-Requires [uv](https://docs.astral.sh/uv/) and a free
+Requires [uv](https://docs.astral.sh/uv/), Node 20+ and a free
 [Supabase](https://supabase.com) project. That is the whole list.
 
-**1. Create a Supabase project.** The free tier is enough.
-
-**2. Point the app at it.**
-
 ```bash
-cp backend/.env.example backend/.env
+cp backend/.env.example backend/.env       # then fill in the three required values
+make dev                                   # install, then migrate
+make seed                                  # three demo cats, funded through the ledger
+make serve                                 # api on http://localhost:8000
 ```
 
-Fill in `DATABASE_URL` from the Supabase dashboard under **Connect**, **Direct**,
-**Session pooler**, as a URI. Two things matter and both are covered in
-`.env.example`: take the **session** pooler on port **5432** rather than the
-transaction pooler on 6543, and copy the hostname rather than assembling it,
-since newer projects sit behind `aws-1-<region>` and older ones behind `aws-0-`.
+`DATABASE_URL`, `SUPABASE_URL` and `SUPABASE_SECRET_KEY`. The first two are
+resolved at startup, so the API refuses to boot without them rather than failing
+one request at a time; the third is read by `make seed` alone.
 
-**3. Run it.**
+Take `DATABASE_URL` from the Supabase dashboard under **Connect**, **Session
+pooler**, as a URI. Port **5432**, not the transaction pooler on 6543, and copy
+the hostname rather than assembling it. `.env.example` explains why for each.
 
-```bash
-make dev        # install dependencies, then migrate
-make seed       # three demo cats, with logins, funded through the ledger
-make serve      # api on http://localhost:8000
-```
-
-`make seed` needs `SUPABASE_URL` and `SUPABASE_SECRET_KEY` as well, because it
-creates the Supabase auth users the cats sign in as. It prints the email and
-password for each. Lotus starts with nothing on purpose, so a rejected transfer
-can be demonstrated without editing data first. All three are funded through the
-ledger rather than by writing balances, so a freshly seeded database reconciles.
-
-`curl localhost:8000/health` reports whether the API can actually reach the
-database and whether that database has been migrated. Interactive docs at
-<http://localhost:8000/docs>.
-
-**4. Run the web app**, in a second terminal.
+Then the web app, in a second terminal:
 
 ```bash
 cp frontend/.env.example frontend/.env.local
-cd frontend && npm install && npm run dev
+cd frontend && npm install && npm run dev  # http://localhost:3000
 ```
 
-Fill in the Supabase URL and the **publishable** key (it begins `sb_publishable_`,
-not `sb_secret_`) from the same dashboard page, and leave `NEXT_PUBLIC_API_BASE_URL`
-pointing at the local API. Then open <http://localhost:3000> and sign in with one
-of the emails `make seed` printed.
+`make seed` prints the shared password once and then an email per cat. Lotus
+starts with nothing on purpose, so a rejected transfer can be demonstrated
+without editing data first.
 
-All three values are compiled into the browser bundle and are meant to be public.
-The secret key is not among them and never should be: it belongs to `make seed`,
-which runs from your machine.
+Verify with `curl localhost:8000/health`, which reports whether the database is
+reachable **and** migrated. Interactive docs at `/docs`; the wire contract,
+idempotency rules and every error code are in [api.md](docs/api.md).
 
-### The endpoints
+## Configuration
 
-Everything but `/health` needs `Authorization: Bearer <supabase access token>`.
-The full contract, including the idempotency rules and every error code, is in
-[docs/api.md](docs/api.md).
+Environment variables only. **`backend/.env.example` and `frontend/.env.example`
+are the canonical lists**, with a note against each explaining what it is for and
+what goes wrong without it. Copy them and fill them in.
 
-| | |
-|---|---|
-| `GET /health` | Reachable, and migrated |
-| `POST /api/v1/cats` | Claim a handle for the signed-in account |
-| `GET /api/v1/cats` | Who you can send to |
-| `GET /api/v1/me` | The signed-in cat, with its balance |
-| `GET /api/v1/me/entries` | Statement, newest first |
-| `POST /api/v1/transfers` | Send treats |
-| `POST /api/v1/deposits` | Top up from the treasury |
-
-Both `POST`s require an `Idempotency-Key` header. Generate it once per intent and
-reuse it on every retry of that intent: that is what makes a retry safe, and
-regenerating it on retry is how a double spend happens.
-
-The migrations create a `meowpay` schema and put the three tables in it, rather
-than using `public`. That is a security decision and not tidiness:
-[why](docs/decisions.md#where-the-tables-live).
-
-### Without make
-
-Each target is a one-line wrapper, so `make` is a convenience and never a
-dependency:
-
-| Target | Raw command |
-|---|---|
-| `install` | `cd backend && uv sync --group dev` |
-| `migrate` | `cd backend && uv run alembic upgrade head` |
-| `seed` | `cd backend && uv run meowpay-seed` |
-| `revision` | `cd backend && uv run alembic revision --autogenerate -m "..."` |
-| `dev` | `install` then `migrate` |
-| `serve` | `cd backend && uv run meowpay-api --reload` |
-| `lint` | `cd backend && uv run ruff check src/ tests/` |
-| `format` | `cd backend && uv run ruff format src/ tests/` |
-| `typecheck` | `cd backend && uv run mypy src/ tests/` |
-| `check` | `cd backend && uv run alembic check` |
-| `test` | `cd backend && uv run pytest` |
-| `test-fast` | `cd backend && uv run pytest -m "not concurrency"` |
-| `all` | lint, typecheck and test |
-
-There is no `clean`. To roll the schema back:
-`cd backend && uv run alembic downgrade base`.
-
-The front end is not wrapped in `make`. It is npm and there is nothing to
-simplify: `npm run dev`, `npm run build`, `npm run typecheck` and `npm test`,
-from `frontend/`.
+`DATABASE_URL` and `SUPABASE_URL` are resolved at startup. `SUPABASE_SECRET_KEY`
+is read by `make seed` and by nothing else, so it belongs on a developer machine
+and never on a deployed service.
 
 ## Development
 
-`make all` runs lint, typecheck and tests. `make check` runs `alembic check`
-separately, because it needs a reachable database and would turn the deliberate
-skip below into a hard failure.
-
-Run this once per clone, before the first commit:
-
 ```bash
-cd backend && uv run pre-commit install
+make lint        # ruff
+make format      # ruff, in place
+make typecheck   # mypy
+make test        # pytest
+make all         # lint + typecheck + test
+make check       # alembic check, needs a reachable database
 ```
 
-Without it the hygiene hooks are configuration and nothing else. They lint,
-format and catch trailing whitespace, missing final newlines, unparseable YAML,
-files over 500kb, committed private keys and merge conflict markers, and they
-run on commit rather than in CI so the history is clean rather than reported on
-afterwards. Ruff is pinned to one exact version in both
-`.pre-commit-config.yaml` and `backend/pyproject.toml`, because a formatter that
-disagrees with itself rewrites the files the other half just approved.
+`make test-fast` skips the concurrency suite, which is where nearly all the wall
+clock goes. Every target is a thin wrapper around one `uv run` command, apart
+from `dev` and `all` which chain others, so the Makefile is readable as the list
+of raw commands if you would rather not use `make`.
 
-Note that `alembic check` does **not** compare CHECK constraint bodies, so a
-Python validator that drifts from its constraint passes it cleanly. The tests
-that read `pg_get_constraintdef` are what cover that:
+The front end is npm and not wrapped: `npm run dev`, `npm test`,
+`npm run typecheck` and `npm run build`, from `frontend/`.
+
+Run `cd backend && uv run pre-commit install` once per clone, or the hygiene
+hooks never execute.
+
+Tests that need a database create and drop their own throwaway one on the same
+Supabase project, and refuse any name not ending `_test`. Without a reachable
+database they skip rather than fail, and that skip is deliberately narrow:
+[the rule](docs/architecture.md#the-skip-rule). Note that `alembic check` does
+**not** compare CHECK constraint bodies, so the tests that read
+`pg_get_constraintdef` are what cover that drift:
 [the guard](docs/architecture.md#the-guard-that-alembic-check-does-not-provide).
 
-Tests needing a database create their own throwaway `meowpay_test` database on
-the same Supabase project, migrate it with Alembic and drop it afterwards. The
-suite refuses to run against any database whose name does not end in `_test`.
+## Deployment
 
-Without a reachable database they skip rather than fail. That convenience is a
-hazard, so the skip is narrow: it fires only when nothing answered. A wrong
-password or an exhausted pool is an error, because a configuration problem
-reported as "not reachable" would hide behind a green run.
-[The rule](docs/architecture.md#the-skip-rule).
+The API runs on Render and the web app on Vercel, both wired to this repo
+through their dashboards. There is no committed platform config, because neither
+service reads one when it is created by hand.
 
-**Set `MEOWPAY_REQUIRE_DB=1` in CI**, where a skipped suite and a passing suite
-are indistinguishable, and where a free-tier project paused after 7 days of
-inactivity would otherwise look like success.
+The runbook, including the three prerequisites no health check can catch, is in
+[deployment.md](docs/deployment.md).

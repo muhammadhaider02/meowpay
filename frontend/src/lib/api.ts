@@ -3,7 +3,20 @@
 import { getSupabase } from "@/lib/supabase";
 import type { ApiErrorBody, Cat, EntryPage, Me, Movement } from "@/lib/types";
 
-const BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+/**
+ * The API origin, with any trailing slash removed.
+ *
+ * `.env.example` asks for no trailing slash and nothing enforced it, so a
+ * pasted value ending in `/` produced `//api/v1/me`. Some servers treat that as
+ * a different path and some normalise it, which is the kind of difference that
+ * shows up only once, in production.
+ *
+ * The localhost fallback is for development and tests only. A production build
+ * cannot reach it: `next.config.ts` refuses to build without this variable, and
+ * that check is deliberately there rather than here, so it cannot be silenced
+ * by a change to how the pages render.
+ */
+const BASE = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000").replace(/\/+$/, "");
 
 /**
  * Render's free tier spins down after 15 minutes idle and takes around 50

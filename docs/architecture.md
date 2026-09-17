@@ -59,7 +59,8 @@ meowpay/
 ├── docs/
 │   ├── api.md                       # every endpoint, and the wire contract
 │   ├── architecture.md              # this file
-│   └── decisions.md                 # what was chosen, what was skipped, why
+│   ├── decisions.md                 # what was chosen, what was skipped, why
+│   └── deployment.md                # the render and vercel runbook
 │
 ├── frontend/                        # next.js app router. the only thing a cat sees
 │   ├── .env.example                 # three NEXT_PUBLIC_ values, all public by design
@@ -127,11 +128,15 @@ meowpay/
     │
     └── tests/
         ├── conftest.py
+        ├── test_app.py               # no database, no network
         ├── test_auth_tokens.py       # no database, no network
+        ├── test_config.py            # no database, no network
         ├── test_handles.py           # no database, no network
         ├── test_health.py
+        ├── test_history_api.py
         ├── test_ledger.py
         ├── test_ledger_concurrency.py
+        ├── test_movements_api.py
         ├── test_onboarding.py
         └── test_schema.py
 ```
@@ -142,7 +147,8 @@ meowpay/
 
 | Module | Responsibility |
 |---|---|
-| `config.py` | Env loading from `backend/.env`. `require_env()` raises at the point of use so a missing variable names itself in the traceback of whatever needed it; `optional_env()` treats empty as unset. `database_url()` does not return what it was given: it rewrites a bare `postgresql://` to `postgresql+psycopg` (SQLAlchemy would otherwise reach for psycopg2, which is not installed, and the `ModuleNotFoundError` reads as a broken install), defaults `sslmode` to `require` and refuses `disable`/`allow`/`prefer`, refuses port 6543, and refuses a bare `postgres` username against the pooler. `test_database_url()` derives from it by renaming the database, so there is one credential and not two that can drift. `db_schema()`, `require_database()`, `cors_origins()` (refuses `*`), and the Supabase identity settings: `supabase_url()`, `jwks_url()`, `jwt_issuer()`, `jwt_audience()`, `supabase_secret_key()`. |
+| `config.py` | Env loading from `backend/.env`. `require_env()` raises at the point of use so a missing variable names itself in the traceback of whatever needed it; `optional_env()` treats empty as unset. `database_url()` does not return what it was given: it rewrites a bare `postgresql://` to `postgresql+psycopg` (SQLAlchemy would otherwise reach for psycopg2, which is not installed, and the `ModuleNotFoundError` reads as a broken install), defaults `sslmode` to `require` and refuses `disable`/`allow`/`prefer`, refuses port 6543, and refuses a bare `postgres` username against the pooler. `test_database_url()` derives from it by renaming the database, so there is one credential and not two that can drift. `database_summary()` renders host, port and database with no credential, because it is the one value here built to be read by a human and put in a log. `db_schema()`, `require_database()`, `cors_origins()` (refuses `*`), and the Supabase identity settings: `supabase_url()`, `jwks_url()`, `jwt_issuer()`, `jwt_audience()`, `supabase_secret_key()`. |
+| `api/app.py` | `create_app()` and `serve()`. The `lifespan` resolves `DATABASE_URL`, `SUPABASE_URL` and `CORS_ORIGINS` once at startup and logs a redacted summary, so a deployment missing a value fails with a named error in the first log line rather than one request at a time. It deliberately **opens no connection**: validating the URL string is what separates a URL that is never going to work, which should kill the boot, from a database that is merely unreachable, which should leave the service up so `/health` can say so |
 | `ledger.py` | **The only writer of `cats.balance`, `transfers` and `entries`.** `transfer()` and `deposit()` share one `_settle()`, because a deposit is the same movement with the treasury as sender, which is what keeps every entry summing to zero. Returns a frozen `Settlement`, never an ORM object, so a read after the session closes cannot lazy-load. Takes a `sessionmaker` and never a `Session`: row locks are released by COMMIT, so a caller who committed mid-flight would drop them. `_apply_transaction_timeouts()` sets `lock_timeout` per transaction rather than per connection, see [decisions.md](decisions.md#session-settings-do-not-survive-the-pooler). |
 | `auth.py` | `TokenVerifier` turns a bearer token into `Claims`, or raises. Imports no FastAPI and takes its key source as a constructor argument, so its suite needs no network. ES256 via JWKS rather than a shared HS256 secret: with a shared secret this service would hold the key GoTrue **mints** with, so anyone who could read the deployment environment could forge a token for any cat. Accepted algorithms come from the verifier's construction and **never** from the token header. `CurrentCat` deliberately carries no balance. |
 | `seed.py` | `make seed`. Creates three auth users through the GoTrue admin API with `email_confirm`, links cats to them, then funds through `Ledger.deposit` and never by writing `balance`. Each step is independently idempotent, so a crash part way through is repaired by re-running. Reaches GoTrue over HTTP and never queries `auth.users`, which would hard-code the assumption that the application database is the auth database. |
@@ -168,13 +174,10 @@ meowpay/
 
 ### The error envelope
 
-Every 500 renders this shape. The frontend branches on `code`, never on the HTTP status.
-
-| Key | What it is |
-|---|---|
-| `error.code` | Stable machine-readable string. `internal_error` for anything unhandled |
-| `error.message` | Deliberately opaque. Detail goes to the log, keyed by the same request id |
-| `error.request_id` | The UUID also returned in the `X-Request-ID` header, so a user-reported failure maps to one log line |
+Every failure renders one shape, including a 404 on a mistyped path and a 500,
+and callers branch on `error.code` rather than on the status. The shape and the
+full list of codes are in [api.md](api.md#errors), which is the contract both
+sides read.
 
 ---
 
@@ -182,7 +185,7 @@ Every 500 renders this shape. The frontend branches on `code`, never on the HTTP
 
 | Module | Responsibility |
 |---|---|
-| `lib/supabase.ts` | The browser auth client, and the only thing that talks to Supabase directly. It talks to GoTrue and nothing else: the tables live in a private `meowpay` schema PostgREST does not expose, so `supabase.from("cats")` fails even with a valid session. Every balance and every movement comes from FastAPI. A missing `NEXT_PUBLIC_` value throws at module load rather than surfacing as a dead sign-in button, because these are compiled into the bundle at build time |
+| `lib/supabase.ts` | The browser auth client, and the only thing that talks to Supabase directly. It talks to GoTrue and nothing else: the tables live in a private `meowpay` schema PostgREST does not expose, so `supabase.from("cats")` fails even with a valid session. Every balance and every movement comes from FastAPI. A missing `NEXT_PUBLIC_` value throws on first use rather than at import, because the client is built lazily, so this alone would let a build succeed and break on the sign-in button. `next.config.ts` is what prevents that, by refusing a production build without all three values |
 | `lib/api.ts` | The one place that calls the API. Reads the token with `getSession()` immediately before each request rather than holding it in state, because supabase-js refreshes in the background and a captured token produces intermittent 401s. Parses the error envelope into an `ApiError` carrying `code`, which is what callers branch on. Treats **200 and 201 alike**: 201 settled something, 200 replayed one, and a client that branches on 201 breaks on every retry. Retries **once**, and only on `token_expired`, which is safe only because the idempotency key is stable across the retry. `ledger_busy` is deliberately not retried behind the user's back |
 | `lib/session.ts` | The two auth gates, which are different questions. `getClaims()` answers "is anyone signed in" by verifying the JWT locally; `getSession()` is not used for it, because it reads local storage without revalidating. Whether that identity has a cat is a question only the API can answer, and `403 cat_not_onboarded` is the answer that routes to onboarding. `auth_unavailable` deliberately does not sign anyone out: bouncing every signed-in user to the login screen during a Supabase blip makes the blip worse. A refresh that fails **after** a movement settled is non-fatal and leaves the page standing, because replacing it with an error screen would report a successful send as a failure. Every load carries a generation and only the newest may commit, since two really do overlap |
 | `lib/idempotency.ts` | Where an idempotency key lives, and deliberately not a React ref. A key tied to a mounted component is minted again by anything that unmounts one, and switching between the send and top-up tabs does exactly that: an attempt whose response was lost, a tab switch, then a resubmit reaches the backend under a key it has never seen and settles a second time. So the key sits in `sessionStorage`, one slot per kind of movement, surviving unmount and reload. It rotates on a settlement and on `idempotency_key_reused`, and on nothing else, because a rejected transfer does not consume its key |
@@ -264,13 +267,19 @@ reconciliation test rather than by the schema.
 
 ## Configuration (environment variables)
 
-Read from `backend/.env`. See `backend/.env.example`.
+Read from `backend/.env`. **`backend/.env.example` is the canonical list**, with
+a note against each variable; the two below are the ones without a usable
+default, and `frontend/.env.example` covers the browser bundle separately.
 
 **Required**
+
+Both are resolved by the lifespan at startup, so the application refuses to boot
+without them rather than failing one request at a time.
 
 | Variable | Purpose |
 |---|---|
 | `DATABASE_URL` | Supabase **session pooler** URI, port 5432. Normalised and validated on read, see `config.py` above. There is no fallback: a default would let a misconfigured deployment connect to nothing and report it as a database outage |
+| `SUPABASE_URL` | The project, which is also where the JWKS URL, the token issuer and the GoTrue admin endpoint are derived from unless each is set explicitly |
 
 **Optional**
 
@@ -286,21 +295,23 @@ Read from `backend/.env`. See `backend/.env.example`.
 
 ## Tests
 
-Two suites. `cd backend && uv run pytest` is 187 tests and owns every guarantee
-about money. `cd frontend && npm test` is 42 and owns the parts of the browser
+Two suites. `cd backend && uv run pytest` is 203 tests and owns every guarantee
+about money. `cd frontend && npm test` is 43 and owns the parts of the browser
 that could cause a double spend: the request client and the key store.
 
 | File | Covers |
 |---|---|
 | `conftest.py` | Throwaway `meowpay_test` database created, migrated with Alembic and dropped per session. Per-test isolation is an outer transaction that is never committed, with `join_transaction_mode="create_savepoint"` so code under test can really call `commit()` while the outer transaction still owns the rollback. `_test_db_name()` refuses any database not ending `_test`, because the drops use `WITH (FORCE)` and would succeed in destroying the application's data |
 | `test_health.py` | `/health` healthy, unreachable and reachable-but-unmigrated. Plus the 500 envelope carrying CORS headers and leaking nothing, and a forged request id being replaced |
+| `test_app.py` | What is mounted, and whether the OpenAPI schema can be built at all. No database and no network: the startup checks are given well formed fakes that nothing dials. Also that a malformed connection string stops the application starting, and that the startup log names the database without carrying its password |
+| `test_config.py` | The refusals a misconfigured deployment walks into, with no database and no network: the transaction pooler port, an `sslmode` that permits plaintext, a bare `postgres` username against the pooler, a missing or empty variable, and `*` in `CORS_ORIGINS`. Also that `database_summary()` carries no password, since that string exists to be logged |
 | `test_schema.py` | Every constraint above, driven by raw SQL so the database refuses them even when the application is wrong |
 | `test_auth_tokens.py` | The verifier, with a locally generated ES256 key pair. **No database and no network**, so these run anywhere. Algorithm confusion, `alg: none`, wrong issuer, wrong audience, expiry, a non-uuid subject, anonymous users, unknown `kid`, clock skew, and the ours-versus-theirs split between an unreachable key set (503) and a kid that is genuinely absent (401) |
-| `test_handles.py` | `normalise_handle` and `normalise_display_name`, called directly. No database, no network. These exist because `OnboardRequest` strips and bounds its input before the route runs, so several guards are **unreachable** from an endpoint test and were deletable with every endpoint test still green |
-| `test_movements_api.py` | Transfers and deposits over HTTP, with the ledger and the database real. The sender coming from the token and not the body, replay as a 200, a ledger refusal arriving in the envelope with CORS headers, and the 403 that `CurrentCatDep` could not fire until these routes existed |
+| `test_handles.py` | `normalise_handle` and `normalise_display_name`, called directly. No database, no network. These exist because `OnboardRequest` strips and bounds its input before the route runs, so several guards are **unreachable** from an endpoint test and are covered nowhere else |
+| `test_movements_api.py` | Transfers and deposits over HTTP, with the ledger and the database real. The sender coming from the token and not the body, replay as a 200, a ledger refusal arriving in the envelope with CORS headers, and the 403 `CurrentCatDep` raises for a verified token with no cat |
 | `test_history_api.py` | Balance, statement and directory. Double entry seen from both sides, the keyset walk paging to the end without repeating a row, and the directory excluding the caller and the treasury |
 | `frontend/src/lib/api.test.ts` | The request client, in Node with no browser. What actually goes on the wire, since a route or a body that is never asserted is a route that can be pointed anywhere; a retry reusing its idempotency key **and** carrying a freshly read token, which are jointly the only reason retrying is safe; 201 and 200 both being success, so a replay is not reported as a failure; the retry firing once and only for `token_expired`, never for a `ledger_busy` that may already have moved treats; the abort budget covering the body read and not just the headers |
-| `frontend/src/lib/idempotency.test.ts` | That a key outlives the component that used it, survives a reload, stays steady when `sessionStorage` is denied, and changes only when the intent is over. These are the assertions that would have caught the tab-switch double spend |
+| `frontend/src/lib/idempotency.test.ts` | That a key outlives the component that used it, survives a reload, stays steady when `sessionStorage` is denied, and changes only when the intent is over. These are the assertions that catch the tab-switch double spend |
 | `test_onboarding.py` | `POST /api/v1/cats` over HTTP with only the cryptography stubbed, so the cat lookup, the 403, the handle collisions and the envelope all run for real |
 | `test_ledger.py` | Settlement, idempotent replay, every typed rejection, and reconciliation. Two tests assert on the **emitted SQL** rather than behaviour, because `ORDER BY` and `FOR NO KEY UPDATE` are plan-shape properties whose absence shows up as a deadlock under load and never in a functional test |
 | `test_ledger_concurrency.py` | Eight threads on real connections with real commits: one key settles exactly once, eight transfers cannot overdraw, opposing transfers do not deadlock, and the ledger still reconciles afterwards. Plus the `lock_timeout` to `55P03` to 503 chain |
@@ -318,8 +329,7 @@ the same strings and requires them to agree. Without it, widening
 while the endpoint returns 500 on a handle the service accepts and the database
 refuses.
 
-Two more pairs are guarded the same way, and both became reachable by a caller
-the moment the HTTP surface existed:
+Two more pairs are guarded the same way, and both are reachable by a caller:
 
 | Python | SQL constraint |
 |---|---|

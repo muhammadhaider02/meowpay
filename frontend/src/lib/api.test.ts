@@ -128,6 +128,23 @@ describe("what goes on the wire", () => {
     expect(callOptions().headers["Content-Type"]).toBe("application/json");
   });
 
+  it("strips a trailing slash off the configured origin", async () => {
+    // `.env.example` asks for no trailing slash and nothing enforced it, so a
+    // pasted value ending in `/` produced `//api/v1/me`. Some servers treat
+    // that as a different path and some normalise it, which is the kind of
+    // difference that shows up once, in production.
+    vi.resetModules();
+    vi.stubEnv("NEXT_PUBLIC_API_BASE_URL", "https://api.example.com///");
+    const { api: fresh } = await import("@/lib/api");
+    fetchMock.mockResolvedValue(respond(200, {}));
+
+    await fresh.me();
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("https://api.example.com/api/v1/me");
+    vi.unstubAllEnvs();
+    vi.resetModules();
+  });
+
   it("never serves a balance or a statement from cache", async () => {
     fetchMock.mockResolvedValue(respond(200, {}));
 

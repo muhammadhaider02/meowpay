@@ -1,9 +1,22 @@
-"""Liveness, including whether the database is reachable and migrated.
+"""Whether this process can reach a correctly migrated database.
 
-One endpoint rather than a liveness/readiness split. There is no load balancer
-here to need a probe that never touches a dependency, and the brief checks that
-the backend is real, so an endpoint that proves the database connection is worth
-more than one that cannot fail.
+By the usual taxonomy this is a **readiness** check, not a liveness one: it
+touches a dependency and it can fail. There is no separate liveness endpoint,
+and that is now a deliberate trade rather than an absence.
+
+Render is pointed at this path, so it also gates deploys: traffic does not move
+to a new instance until this passes, which means a build that cannot read the
+database never replaces one that can. A dependency-free probe would be a weaker
+gate, waving through exactly that. The cost is the other direction: a database
+that is merely having a bad minute fails a deploy of code that is fine, and a
+hotfix cannot ship while it is degraded.
+
+Two limits worth knowing before trusting it. It proves the treasury row from
+migration 0002 exists, so a **later** migration that was never applied leaves
+this green while routes 500; it catches an unmigrated database, not drift. And
+`connect_timeout` is 10s, so an unreachable database makes each probe hang that
+long, which a platform may report as a timeout rather than as a database
+problem.
 """
 
 from __future__ import annotations

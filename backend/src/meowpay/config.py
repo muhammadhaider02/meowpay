@@ -4,9 +4,11 @@ Plain os.getenv with lazy validation. require_env raises at the point of use
 rather than at import, so a missing variable names itself in the traceback of
 the thing that actually needed it.
 
-`database_url()` does not hand back what it was given. It normalises, and it
-refuses four things outright. Each refusal is a copy-paste mistake whose symptom
-otherwise points somewhere else entirely, and three of the four are silent.
+`database_url()` does not hand back what it was given. It rewrites two things
+silently, the driver and a missing sslmode, and refuses three outright: the
+transaction pooler port, an sslmode that permits plaintext, and a bare
+`postgres` username against the pooler. Each refusal is a copy-paste mistake
+whose symptom otherwise points somewhere else entirely.
 """
 
 import os
@@ -83,14 +85,25 @@ def _normalise(url: str) -> str:
     #    Downgrading it is a refusal.
     query = dict(parsed.query)
     sslmode = query.get("sslmode")
+
+    # A repeated key parses as a tuple rather than a string, and libpq honours
+    # the last occurrence. Collapsing to that value first is what stops
+    # `?sslmode=require&sslmode=disable` slipping past the refusal below as a
+    # value matching neither branch. Lowercased for the same reason: `Disable`
+    # disables just as thoroughly as `disable`.
+    if isinstance(sslmode, tuple):
+        sslmode = sslmode[-1] if sslmode else None
+    if sslmode is not None:
+        sslmode = sslmode.lower()
+
     if sslmode in ("disable", "allow", "prefer"):
         raise RuntimeError(
             f"DATABASE_URL sets sslmode={sslmode}, which permits an unencrypted connection. "
             "The password and every balance travel over this link. Use sslmode=require."
         )
-    if sslmode is None:
-        query["sslmode"] = "require"
-        parsed = parsed.set(query=query)
+
+    query["sslmode"] = sslmode or "require"
+    parsed = parsed.set(query=query)
 
     # 4. A plain `postgres` username against the pooler produces Supavisor's
     #    "Tenant or user not found", which names neither the username nor the
@@ -114,6 +127,25 @@ def database_url() -> str:
     outage rather than a missing variable.
     """
     return _normalise(require_env("DATABASE_URL"))
+
+
+def database_summary() -> str:
+    """The connection, with the password removed, safe to put in a log.
+
+    Everywhere else in this module renders with `hide_password=False`, because
+    the point there is to hand a working URL to a driver. This is the one place
+    that exists to be read by a human, so it is the one place that must not
+    carry the credential: a startup line naming the host, port and database is
+    what makes a misconfigured deploy diagnosable from a dashboard log, and a
+    startup line carrying the password is a credential in a log aggregator for
+    ever.
+
+    Built from the parsed components rather than by masking the rendered
+    string, so there is no pattern for an unusual password to slip past. The
+    credential is never in the value at all.
+    """
+    parsed = make_url(database_url())
+    return f"{parsed.host}:{parsed.port or 5432}/{parsed.database}"
 
 
 def test_database_url() -> str:

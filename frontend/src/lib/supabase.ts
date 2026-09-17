@@ -14,9 +14,12 @@ import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 function required(name: string, value: string | undefined): string {
   if (!value) {
-    // Thrown at module load in development, which is the point. A missing
-    // NEXT_PUBLIC_ value is baked in at build time, so a silent undefined here
-    // becomes a deployed app that fails on the sign-in button instead.
+    // Thrown on first use, not at import: this client is built lazily and
+    // every call site is inside an effect or a handler. So a build with no
+    // variables set succeeds and the app breaks on the sign-in button.
+    // `next.config.ts` is what makes that impossible in production, by
+    // refusing the build outright. This stays as the backstop for a
+    // development machine with no .env.local.
     throw new Error(
       `${name} is not set. Copy frontend/.env.example to .env.local and fill it in.`,
     );
