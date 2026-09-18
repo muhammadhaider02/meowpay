@@ -99,24 +99,32 @@ export default function DashboardPage() {
       {receipt ? <Receipt movement={receipt} onDone={() => setReceipt(null)} /> : null}
 
       <div className="card">
-        <div className="tabs">
-          <button type="button" aria-pressed={tab === "send"} onClick={() => setTab("send")}>
-            Send treats
-          </button>
-          <button
-            type="button"
-            aria-pressed={tab === "deposit"}
-            onClick={() => setTab("deposit")}
-          >
-            Top up
-          </button>
-        </div>
+        <h2>{tab === "send" ? "Send treats" : "Top up"}</h2>
 
         {tab === "send" ? (
           <SendForm onSettled={settled} />
         ) : (
           <DepositForm onSettled={settled} />
         )}
+
+        {/* Top up is funding scaffolding rather than a second product verb: a
+            human funds the wallet and the cat spends it. Peer tabs gave the two
+            acts equal standing, which is not what the ledger says. Sending is
+            the heading; funding is a link under it. */}
+        <p className="muted" style={{ marginTop: 16, marginBottom: 0 }}>
+          {tab === "send" ? (
+            <>
+              Out of treats?{" "}
+              <button type="button" className="link" onClick={() => setTab("deposit")}>
+                Top up from the treasury
+              </button>
+            </>
+          ) : (
+            <button type="button" className="link" onClick={() => setTab("send")}>
+              Back to sending treats
+            </button>
+          )}
+        </p>
       </div>
 
       <div className="card">

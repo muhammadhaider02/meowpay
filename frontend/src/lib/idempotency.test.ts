@@ -2,7 +2,7 @@
  * The key store, whose whole job is to outlive a React component.
  *
  * The bug this file exists to prevent: a key held in a `useRef` is minted again
- * whenever the form unmounts, and switching between the send and top-up tabs
+ * whenever the form unmounts, and switching between the send and top-up forms
  * unmounts it. An attempt whose response was lost, followed by a tab switch and
  * a resubmit, then reaches the backend under a key it has never seen and settles
  * a second time.

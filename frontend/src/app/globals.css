@@ -183,24 +183,6 @@ button.link {
   text-decoration: underline;
 }
 
-.tabs {
-  display: flex;
-  gap: 6px;
-  margin-bottom: 16px;
-}
-
-.tabs button {
-  background: transparent;
-  border: 1px solid var(--border);
-  color: var(--muted);
-}
-
-.tabs button[aria-pressed="true"] {
-  background: var(--accent-soft);
-  border-color: var(--accent);
-  color: var(--accent);
-}
-
 .notice {
   border-radius: 8px;
   padding: 11px 13px;

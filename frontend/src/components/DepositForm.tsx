@@ -69,6 +69,11 @@ export function DepositForm({ onSettled }: { onSettled: (movement: Movement) => 
         </div>
       ) : null}
 
+      <p className="muted" style={{ marginTop: 0 }}>
+        Stands in for the payment rail a human would use. The treats come from
+        the treasury, whose balance goes negative by the same amount.
+      </p>
+
       <div className="field">
         <label htmlFor="deposit-amount">Treats to add</label>
         <input

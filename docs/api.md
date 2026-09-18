@@ -270,7 +270,7 @@ The statement: the signed-in cat's ledger lines, newest first.
 | Query | Default | Notes |
 |---|---|---|
 | `limit` | 20 | 1 to 100 |
-| `before` | — | Cursor. Pass back `next_before`, never construct it |
+| `before` | none | Cursor. Pass back `next_before`, never construct it |
 
 ```json
 {

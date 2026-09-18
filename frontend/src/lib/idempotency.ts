@@ -5,7 +5,7 @@
  *
  * The key used to live in a `useRef` inside each form, which tied its lifetime
  * to a mounted component. Anything that unmounted the form minted a new one:
- * switching between the send and top-up tabs, the dashboard falling back to its
+ * switching between the send and top-up forms, the dashboard falling back to its
  * error screen, or a reload. That is a double spend, and it is the exact one the
  * header exists to prevent: an attempt whose response was lost, followed by a
  * retry the backend cannot recognise as a retry.

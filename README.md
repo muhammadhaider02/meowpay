@@ -58,10 +58,19 @@ Those are seed amounts, not current balances. This is a live wallet and
 `make seed` will not restore one: its deposits carry a fixed idempotency key, so
 a re-run replays and settles nothing.
 
-**Top up** is how treats enter a wallet. They come from the treasury, whose
-balance goes correspondingly negative, which is what keeps every movement summing
-to zero. The treasury has no login and structurally cannot be given one:
+**Top up** is how treats enter a wallet. The brief has humans funding and cats
+sending. Humans are not modelled here: a human is a funding source outside
+the system boundary, so a top-up is a deposit from the treasury rather than a
+movement between two stored entities. The treasury's balance goes
+correspondingly negative, which is what keeps every movement summing to zero. It
+has no login and structurally cannot be given one:
 [why](docs/architecture.md#constraints).
+
+That makes top-up a funding stub rather than a product surface, and the
+consequence is worth naming rather than leaving to be found: sign-up is open and
+a deposit needs no funding, so a signed-in cat can mint from the treasury. What
+stops that in a real wallet is a payment rail and a velocity limit. This slice
+has neither. [Why](docs/decisions.md#skipped).
 
 ## Quickstart
 

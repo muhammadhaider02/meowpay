@@ -21,7 +21,7 @@ The API accepts ES256 and RS256 against the project's key set and has no
 shared-secret path, so a backend compromise cannot mint a session. On a project
 still using the legacy HS256 secret the key set is **empty**, and the symptom is
 not an error you can find by looking: the deploy is green, the page loads,
-signing in works, and every authenticated request answers 401.
+signing in works and every authenticated request answers 401.
 
 ```bash
 curl "$SUPABASE_URL/auth/v1/.well-known/jwks.json"   # must list keys
@@ -44,7 +44,7 @@ cd backend && uv run alembic upgrade head
 
 **This one blocks the deploy.** `/health` reads the treasury row, which
 migration `0002` creates, so against an unmigrated database it answers 503,
-Render's health check never passes, and traffic never moves to the new instance.
+Render's health check never passes and traffic never moves to the new instance.
 
 Migrations run from a developer machine rather than from Render. The session
 pooler is reachable from anywhere, and a release command that migrates on every

@@ -10,8 +10,8 @@ What was chosen, what was skipped and why. The map of what exists is in
 | Decision | Why |
 |---|---|
 | **Supabase as the only database** | Nothing to install and nothing to start, so the deployed app and a fresh clone reach the same kind of database. A reviewer creates a free project and pastes one connection string |
-| **Session pooler, port 5432** | A long lived backend wants one server connection per client connection. That keeps prepared statements valid, lets session level settings hold, and gives each thread its own Postgres backend. `config.py` refuses 6543 outright, because one digit separates the two and all three consequences are silent |
-| **`DATABASE_URL` normalised on read, not trusted** | Four refusals, each a likely copy-paste whose symptom otherwise points elsewhere: a bare `postgresql://` resolves to psycopg2 and fails as a broken install, `sslmode=prefer` silently falls back to plaintext, port 6543 breaks three things quietly, and a bare `postgres` username returns Supavisor's undiagnosable `Tenant or user not found` |
+| **Session pooler, port 5432** | A long lived backend wants one server connection per client connection. That keeps prepared statements valid, lets session level settings hold and gives each thread its own Postgres backend. `config.py` refuses 6543 outright, because one digit separates the two and all three consequences are silent |
+| **`DATABASE_URL` normalised on read, not trusted** | Four refusals, each a likely copy-paste whose symptom otherwise points elsewhere: a bare `postgresql://` resolves to psycopg2 and fails as a broken install, `sslmode=prefer` silently falls back to plaintext, port 6543 breaks three things quietly and a bare `postgres` username returns Supavisor's undiagnosable `Tenant or user not found` |
 | **No fallback for `DATABASE_URL`** | A default would let a misconfigured deployment connect to nothing and report it as a database outage rather than a missing variable |
 | **Tables in a `meowpay` schema** | See [below](#where-the-tables-live) |
 | **`BIGINT` minor units** | No floats and no decimals anywhere in the stack. Treats are whole things |
@@ -114,7 +114,7 @@ connection.
 **`lock_timeout` goes further and is set per transaction**, as the first
 statement inside `_settle`. It is the one setting the money path depends on:
 Postgres raises `55P03` when it expires, the ledger translates that to
-`LedgerBusyError`, and the caller gets a retryable 503 instead of a hang. Absent,
+`LedgerBusyError` and the caller gets a retryable 503 instead of a hang. Absent,
 that path does not exist and a contended transfer waits out the 30s
 `statement_timeout` and fails as `57014`, which nothing translates. Scoping it to
 the transaction also keeps `idle_in_transaction_session_timeout` off the test
@@ -145,6 +145,7 @@ Deliberately not built. Each is a decision rather than an oversight.
 | A per-request payload checksum | The idempotency key already makes a replayed request safe and TLS already makes a tampered one detectable. A checksum the client computes proves only that the client computed it |
 | A verification header beyond `X-Request-ID` | That is tracing rather than verification, and `X-Request-ID` already traces: it is accepted only as a UUID, echoed on every response and carried in every error envelope |
 | A CI pipeline | The gates run from `make all`, the pre-commit hooks and the two platform builds, which is where a broken push is actually stopped: Render will not move traffic to an instance that fails its health check, and a Vercel build refuses to start without its three public values. Nothing proves a given push was tested, and a runner is the fix if anyone else commits here |
+| **A human actor and a role separating who may fund from who may send** | One identity owns one wallet, so a `human` role and a `cat` role would sit on the same principal and the check would prevent nothing. Real separation needs a second identity and a guardianship relation, which is a different product. The boundary is modelled in the ledger instead: a deposit crosses it with the treasury as counterparty, a transfer moves inside it with the treasury forbidden as a party. What is missing is not the role but the payment rail that authorises a deposit in the first place and with it a velocity limit. The cost is in the trade-offs below |
 
 ---
 
@@ -161,5 +162,6 @@ Deliberately not built. Each is a decision rather than an oversight.
 | **The zero-sum property is not a database constraint** | It holds because `ledger.py` is the only writer, and a reconciliation test asserts it. The schema does not guarantee it |
 | **`UNIQUE (transfer_id, cat_id)` means one leg per cat** | Fine for two-party movements. Fee or FX legs would need revisiting |
 | **Free tier sleeps, in two different ways** | Render spins the API down after 15 minutes idle and takes around 50 seconds to wake, which is the one a reviewer actually meets: `lib/api.ts` budgets 60 seconds and the page says it is waking rather than showing a spinner. Supabase pauses the database after 7 days of inactivity, which is slower to hit and worse to hit, and the bring-your-own-project path in the README is the mitigation |
-| **No rate limiting** | Nothing throttles a caller. Idempotency stops a repeated request settling twice, and the balance check stops a cat spending what it does not have, so the exposure is load rather than lost treats. At this size it belongs at the edge, and middleware nobody load-tested would read as coverage rather than be it |
+| **No rate limiting** | Nothing throttles a caller. Idempotency stops a repeated request settling twice and the balance check stops a cat spending what it does not have, so the exposure is load rather than lost treats. At this size it belongs at the edge and middleware nobody load-tested would read as coverage rather than be it |
 | **Tests share a project with the application** | The free tier allows two projects in total. Isolation comes from a separate throwaway database and from refusing any database whose name does not end `_test` |
+| **Open sign-up and an uncapped deposit** | `/deposits` is bounded only by the per-movement cap and the JavaScript safe balance floor, so any visitor to the deployed app can mint treats and a persistent one can walk the treasury to that floor and leave top-up failing for everyone. Accepted because the endpoint stands in for a payment rail rather than simulating one, and because the honest control is a velocity limit: a per-request cap bounds one request and not the sequence, which is the appearance of a fix rather than one. Rate limiting is above, for the same reason it would be needed here |
