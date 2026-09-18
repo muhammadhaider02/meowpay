@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
 import { ApiError, api } from "@/lib/api";
+import { useWindowFocus } from "@/lib/focus";
 import { getSupabase } from "@/lib/supabase";
 import type { Me } from "@/lib/types";
 
@@ -61,14 +62,28 @@ export function useSession(): Session {
       setRefreshError(null);
 
       try {
+        // The gate answers "is anyone signed in", which is a question for a
+        // page with nothing on it yet. A background refresh already has a cat
+        // rendered, and `api.me()` is authoritative on its own: it answers 401
+        // if the token has gone bad, and `lib/api.ts` reads the token
+        // immediately before the request rather than trusting a captured one.
+        //
+        // Skipping it on that path is not only a saved round trip. `getClaims`
+        // verifies against a cached JWKS, and supabase-js refreshes the session
+        // on the very event a focus refetch fires on, so the two contend and
+        // this one loses. The symptom was a balance that stayed stale while the
+        // statement, which goes straight to the API, came back current.
+        //
         // Inside the try, not above it. This rejects when the JWKS cannot be
         // fetched, which is the `auth_unavailable` case; outside the try that
         // became an unhandled rejection and the page sat on "Loading" for ever
         // with no way back.
-        const { data } = await getSupabase().auth.getClaims();
-        if (!data?.claims) {
-          router.replace("/sign-in");
-          return;
+        if (!background) {
+          const { data } = await getSupabase().auth.getClaims();
+          if (!data?.claims) {
+            router.replace("/sign-in");
+            return;
+          }
         }
 
         const cat = await api.me(() => {
@@ -119,6 +134,15 @@ export function useSession(): Session {
   }, []);
 
   const refresh = useCallback(() => load(true), [load]);
+
+  // A receiving cat has no way to learn that treats arrived, so the balance is
+  // refetched whenever this window comes back to the front. Nothing runs until
+  // the first load has produced a cat, because a background failure with none
+  // on screen would be reported as fatal rather than as a stale figure.
+  useWindowFocus(() => {
+    if (me === null) return;
+    void refresh();
+  });
 
   return { me, status, error, refreshError, waking, refresh };
 }

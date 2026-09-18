@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { api } from "@/lib/api";
+import { useWindowFocus } from "@/lib/focus";
 import type { Entry } from "@/lib/types";
 
 /**
@@ -21,6 +22,8 @@ export function Statement({ reloadToken }: { reloadToken: number }) {
   const [cursor, setCursor] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Whether anything beyond the first page is on screen.
+  const [paged, setPaged] = useState(false);
 
   const loadFirstPage = useCallback(async () => {
     setLoading(true);
@@ -29,6 +32,7 @@ export function Statement({ reloadToken }: { reloadToken: number }) {
       const page = await api.entries();
       setEntries(page.entries);
       setCursor(page.next_before);
+      setPaged(false);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not load the statement.");
     } finally {
@@ -40,6 +44,19 @@ export function Statement({ reloadToken }: { reloadToken: number }) {
     void loadFirstPage();
   }, [loadFirstPage, reloadToken]);
 
+  // The balance is not the only figure that goes stale while this window sits
+  // behind another one: a transfer lands on both statements, so the receiving
+  // cat's list is a movement short until something reloads it.
+  //
+  // Only while the first page is showing. Someone reading back through their
+  // history should not be thrown to the top of it for switching windows, and a
+  // reload cannot append to a paged list without reconciling cursors it has
+  // already spent.
+  useWindowFocus(() => {
+    if (paged) return;
+    void loadFirstPage();
+  });
+
   async function loadMore() {
     if (cursor == null) return;
     setLoading(true);
@@ -47,6 +64,7 @@ export function Statement({ reloadToken }: { reloadToken: number }) {
       const page = await api.entries(cursor);
       setEntries((current) => [...current, ...page.entries]);
       setCursor(page.next_before);
+      setPaged(true);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not load more.");
     } finally {
